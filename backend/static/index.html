@@ -1,0 +1,1053 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Planificador de Presupuesto - Categorías, Cuentas y Gastos</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React 18 & Babel Standalone -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    /* Incremento del tamaño base de fuente en 1 punto (17px = ~12.75pt vs 16px = 12pt) */
+    html { font-size: 17px; }
+    body { font-family: 'Inter', sans-serif; font-size: 0.9375rem; }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 antialiased selection:bg-indigo-500 selection:text-white">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    const MONTH_NAMES = [
+      'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+      'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+    ];
+
+    // --- Funciones para Precisión Decimal en Centavos ---
+    function parseToCents(val) {
+      if (val === undefined || val === null || val === '') return 0;
+      const str = String(val).trim().replace(',', '.');
+      const clean = str.replace(/[^0-9.-]/g, '');
+      if (!clean || isNaN(Number(clean))) return 0;
+      const parts = clean.split('.');
+      const intP = parseInt(parts[0] || '0', 10);
+      let decP = parts[1] || '';
+      if (decP.length === 1) decP += '0';
+      else if (decP.length > 2) decP = decP.substring(0, 2);
+      else if (decP.length === 0) decP = '00';
+      const sign = clean.startsWith('-') ? -1 : 1;
+      return Math.max(0, sign * (Math.abs(intP) * 100 + parseInt(decP, 10)));
+    }
+
+    function centsToString(cents) {
+      const abs = Math.abs(cents);
+      const intVal = Math.floor(abs / 100);
+      const decVal = abs % 100;
+      const decStr = decVal < 10 ? `0${decVal}` : `${decVal}`;
+      return `${intVal}.${decStr}`;
+    }
+
+    function formatMoney(val) {
+      const cents = parseToCents(val);
+      const intVal = Math.floor(cents / 100);
+      const decVal = cents % 100;
+      const decStr = decVal < 10 ? `0${decVal}` : `${decVal}`;
+      return `$${intVal.toLocaleString('es-EC')}.${decStr}`;
+    }
+
+    // --- Recálculo reactivo en frontend de los 6 totales ---
+    function recalculateSummary(data) {
+      const summary = JSON.parse(JSON.stringify(data));
+      const genMonthly = {};
+      for (let m = 1; m <= 12; m++) genMonthly[m] = 0;
+      let genAnnual = 0;
+
+      summary.categories.forEach(cat => {
+        const catMonthly = {};
+        for (let m = 1; m <= 12; m++) catMonthly[m] = 0;
+        let catAnnual = 0;
+
+        cat.accounts.forEach(acc => {
+          let accAnnual = 0;
+          for (let m = 1; m <= 12; m++) {
+            const c = parseToCents(acc.months[m] || '0.00');
+            // Preservar lo que el usuario está escribiendo; no sobrescribir acc.months[m] aquí
+            accAnnual += c;
+            catMonthly[m] += c;
+          }
+          acc.annual_total = centsToString(accAnnual);
+          catAnnual += accAnnual;
+        });
+
+        cat.annual_total = centsToString(catAnnual);
+        for (let m = 1; m <= 12; m++) {
+          cat.monthly_totals[m] = centsToString(catMonthly[m]);
+          genMonthly[m] += catMonthly[m];
+        }
+        genAnnual += catAnnual;
+      });
+
+      for (let m = 1; m <= 12; m++) {
+        summary.general_monthly_totals[m] = centsToString(genMonthly[m]);
+      }
+      summary.general_annual_total = centsToString(genAnnual);
+
+      let sumGenMonthly = 0;
+      for (let m = 1; m <= 12; m++) sumGenMonthly += genMonthly[m];
+      summary.is_balanced = (sumGenMonthly === genAnnual);
+
+      return summary;
+    }
+
+    function App() {
+      const [data, setData] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+
+      // Celdas modificadas pendientes de guardar
+      const [pendingChanges, setPendingChanges] = useState(new Map());
+      const pendingChangesRef = React.useRef(pendingChanges);
+      pendingChangesRef.current = pendingChanges;
+
+      const dataRef = React.useRef(data);
+      dataRef.current = data;
+
+      const [isSaving, setIsSaving] = useState(false);
+      const [toast, setToast] = useState(null);
+
+      // Modales
+      const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
+      const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
+      const [targetCategoryId, setTargetCategoryId] = useState(null);
+      const [editingAccount, setEditingAccount] = useState(null);
+      const [editingCategory, setEditingCategory] = useState(null);
+
+      const showToast = (msg) => {
+        setToast(msg);
+        setTimeout(() => setToast(null), 3500);
+      };
+
+      const loadSummary = useCallback(async () => {
+        try {
+          const res = await fetch('/api/budget-summary');
+          if (!res.ok) {
+            let detail = '';
+            try {
+              const errData = await res.json();
+              detail = errData.detail || JSON.stringify(errData);
+            } catch (_) {
+              detail = await res.text().catch(() => '');
+            }
+            throw new Error(detail || `Error ${res.status}: No se pudo obtener la estructura del presupuesto`);
+          }
+          const json = await res.json();
+          setData(json);
+          dataRef.current = json;
+          const cleanMap = new Map();
+          setPendingChanges(cleanMap);
+          pendingChangesRef.current = cleanMap;
+        } catch (e) {
+          setError(e.message);
+        } finally {
+          setLoading(false);
+        }
+      }, []);
+
+      useEffect(() => {
+        loadSummary();
+      }, [loadSummary]);
+
+      // Modificación en vivo de una celda mensual individual (usada al tipear en cualquier mes o al editar Feb-Dic)
+      const handleCellChange = (accountId, month, rawVal) => {
+        const currentData = dataRef.current;
+        if (!currentData) return;
+
+        // Normalizar coma a punto decimal (ej: "12,5" -> "12.5")
+        const val = String(rawVal).replace(',', '.');
+
+        // Permitir campo vacío o número positivo con hasta 2 decimales (ej: "", "5", "5.", "5.2", "5.25", ".5")
+        if (val !== '' && !/^[0-9]*\.?[0-9]{0,2}$/.test(val)) return;
+
+        const updated = JSON.parse(JSON.stringify(currentData));
+        for (const cat of updated.categories) {
+          const acc = cat.accounts.find(a => a.id === accountId);
+          if (acc) {
+            acc.months[month] = val;
+            break;
+          }
+        }
+
+        const recalculated = recalculateSummary(updated);
+        setData(recalculated);
+        dataRef.current = recalculated;
+
+        const key = `${accountId}-${month}`;
+        const next = new Map(pendingChangesRef.current);
+        next.set(key, { account_id: accountId, month: month, amount: val });
+        pendingChangesRef.current = next;
+        setPendingChanges(next);
+      };
+
+      // Replicar valor de Enero a todos los meses (1 al 12) de la cuenta
+      const replicateJanuaryToAllMonths = (accountId, formattedVal) => {
+        const currentData = dataRef.current;
+        if (!currentData) return;
+
+        const updated = JSON.parse(JSON.stringify(currentData));
+        let accountName = '';
+        for (const cat of updated.categories) {
+          const acc = cat.accounts.find(a => a.id === accountId);
+          if (acc) {
+            accountName = acc.name;
+            for (let m = 1; m <= 12; m++) {
+              acc.months[m] = formattedVal;
+            }
+            break;
+          }
+        }
+
+        const recalculated = recalculateSummary(updated);
+        setData(recalculated);
+        dataRef.current = recalculated;
+
+        const next = new Map(pendingChangesRef.current);
+        for (let m = 1; m <= 12; m++) {
+          const key = `${accountId}-${m}`;
+          next.set(key, { account_id: accountId, month: m, amount: formattedVal });
+        }
+        pendingChangesRef.current = next;
+        setPendingChanges(next);
+
+        showToast(`Enero ($${formatMoney(formattedVal)}) replicado a Feb - Dic en "${accountName}". Puedes ajustar los otros meses.`);
+      };
+
+      // Al salir de la celda (blur) o presionar Enter:
+      // Si es Enero (month === 1), replica a todos los meses 1..12
+      // Si es de Febrero a Diciembre (month > 1), modifica solo ese mes individual
+      const handleBlur = (accountId, month, val) => {
+        const cents = parseToCents(val);
+        const formatted = centsToString(cents);
+        if (month === 1) {
+          replicateJanuaryToAllMonths(accountId, formatted);
+        } else {
+          handleCellChange(accountId, month, formatted);
+        }
+      };
+
+      const handleSaveExpenses = async () => {
+        const currentPending = pendingChangesRef.current;
+        if (currentPending.size === 0 || !dataRef.current) return;
+        setIsSaving(true);
+        try {
+          const updates = Array.from(currentPending.values()).map(u => ({
+            account_id: u.account_id,
+            month: u.month,
+            amount: centsToString(parseToCents(u.amount))
+          }));
+
+          const res = await fetch('/api/expenses', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ updates })
+          });
+
+          if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.detail || "Error al registrar gastos");
+          }
+
+          const freshData = await res.json();
+          setData(freshData);
+          dataRef.current = freshData;
+          const cleanMap = new Map();
+          setPendingChanges(cleanMap);
+          pendingChangesRef.current = cleanMap;
+          showToast(`¡Se registraron ${updates.length} gasto(s) mensual(es) correctamente!`);
+        } catch (e) {
+          alert("Error: " + e.message);
+        } finally {
+          setIsSaving(false);
+        }
+      };
+
+      const handleDiscard = () => {
+        if (confirm("¿Descartar cambios no guardados?")) {
+          loadSummary();
+        }
+      };
+
+      const handleDeleteCategory = async (catId, catName) => {
+        if (!confirm(`¿Eliminar la categoría "${catName}" y todas sus cuentas asociadas?`)) return;
+        try {
+          const res = await fetch(`/api/categories/${catId}`, { method: 'DELETE' });
+          if (res.ok) {
+            showToast(`Categoría "${catName}" eliminada`);
+            loadSummary();
+          }
+        } catch (e) {
+          alert(e.message);
+        }
+      };
+
+      const handleDeleteAccount = async (accId, accName) => {
+        if (!confirm(`¿Eliminar la cuenta "${accName}"?`)) return;
+        try {
+          const res = await fetch(`/api/accounts/${accId}`, { method: 'DELETE' });
+          if (res.ok) {
+            showToast(`Cuenta "${accName}" eliminada`);
+            loadSummary();
+          }
+        } catch (e) {
+          alert(e.message);
+        }
+      };
+
+      return (
+        <div className="min-h-screen flex flex-col bg-slate-50 text-sm">
+          
+          {/* Toast */}
+          {toast && (
+            <div className="fixed top-20 right-6 z-50 bg-emerald-700 text-white text-sm font-semibold px-4 py-3 rounded-xl shadow-xl flex items-center space-x-2 animate-fade-in">
+              <span>✓</span>
+              <span>{toast}</span>
+            </div>
+          )}
+
+          {/* Barra Superior */}
+          <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
+            <div className="max-w-[1920px] mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+              
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-lg bg-indigo-600 flex items-center justify-center text-white font-bold text-lg shadow-md shadow-indigo-100">
+                  📋
+                </div>
+                <div>
+                  <h1 className="text-base font-bold text-slate-900 leading-tight">Planificador de Presupuesto</h1>
+                  <p className="text-xs text-slate-500 font-medium">Proveedor • Categorías • Cuentas • Gastos Mensuales</p>
+                </div>
+              </div>
+
+              {/* Botón para crear Categoría */}
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => setIsCategoryModalOpen(true)}
+                  className="text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 px-4 py-2 rounded-lg shadow-sm transition flex items-center space-x-1.5"
+                >
+                  <span>+</span>
+                  <span>Nueva Categoría</span>
+                </button>
+              </div>
+
+            </div>
+          </header>
+
+          {/* Área Principal */}
+          <main className="flex-1 max-w-[1920px] w-full mx-auto px-4 sm:px-6 py-5">
+            
+            {loading && (
+              <div className="py-24 text-center">
+                <div className="inline-block animate-spin rounded-full h-8 w-8 border-4 border-indigo-600 border-t-transparent" />
+                <p className="mt-3 text-slate-500 text-sm font-medium">Cargando presupuesto...</p>
+              </div>
+            )}
+
+            {error && (
+              <div className="bg-rose-50 border border-rose-200 text-rose-700 p-4 rounded-xl text-sm font-medium">
+                {error}
+              </div>
+            )}
+
+            {!loading && data && (
+              <div className="space-y-4">
+                
+                {/* Resumen Superior */}
+                <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-3 text-sm">
+                  <div className="flex items-center space-x-5">
+                    <div>
+                      <span className="text-slate-400 font-medium">Categorías:</span>{' '}
+                      <span className="font-bold text-slate-800">{data.categories.length}</span>
+                    </div>
+                    <div className="h-4 w-px bg-slate-200" />
+                    <div>
+                      <span className="text-slate-400 font-medium">Cuentas Totales:</span>{' '}
+                      <span className="font-bold text-slate-800">
+                        {data.categories.reduce((acc, c) => acc + c.accounts.length, 0)}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Tip de Replicación de Enero */}
+                  <div className="hidden lg:flex items-center space-x-2 text-xs text-indigo-900 bg-indigo-50 border border-indigo-200 px-3 py-1.5 rounded-lg">
+                    <span className="text-base font-bold text-indigo-600">⇶</span>
+                    <span>
+                      <strong>Replicador automático:</strong> Un valor en <strong>Enero</strong> se replica a <strong>Feb - Dic</strong>. Luego puedes modificar cualquier mes individualmente.
+                    </span>
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    <span className="text-slate-500 font-medium">Total Anual General:</span>
+                    <span className="text-lg font-extrabold text-indigo-700 font-mono">
+                      {formatMoney(data.general_annual_total)}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Si no hay categorías aún */}
+                {data.categories.length === 0 ? (
+                  <div className="bg-white p-12 rounded-xl border border-dashed border-slate-300 text-center">
+                    <p className="text-slate-500 text-base mb-3">Aún no has creado ninguna categoría.</p>
+                    <button
+                      onClick={() => setIsCategoryModalOpen(true)}
+                      className="text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 px-4 py-2 rounded-lg transition"
+                    >
+                      + Crear mi primera categoría
+                    </button>
+                  </div>
+                ) : (
+                  /* Tabla de Estructura y Gastos Mensuales */
+                  <div className="relative pb-24">
+                    <div className="overflow-x-auto shadow-sm rounded-xl border border-slate-200 bg-white">
+                      <table className="w-full text-left border-collapse text-sm">
+                        
+                        {/* Encabezado */}
+                        <thead className="bg-slate-100 text-slate-700 sticky top-16 z-20 font-semibold border-b border-slate-200">
+                          <tr>
+                            {/* 1. COLUMNA PROVEEDOR (A LA IZQUIERDA DE CATEGORÍA/CUENTA) */}
+                            <th className="py-3 px-3 w-[180px] min-w-[160px] border-r border-slate-200 text-slate-800">
+                              Proveedor
+                            </th>
+                            {/* 2. COLUMNA CATEGORÍA / CUENTA */}
+                            <th className="py-3 px-3 min-w-[280px] border-r border-slate-200">
+                              Categoría / Cuenta
+                            </th>
+                            {MONTH_NAMES.map((mName, idx) => {
+                              const isJan = idx === 0;
+                              return (
+                                <th
+                                  key={mName}
+                                  className={`py-2.5 px-2 text-right min-w-[105px] border-r border-slate-200 transition-colors ${
+                                    isJan ? 'bg-indigo-50/90 text-indigo-950 font-bold border-b-2 border-indigo-400' : ''
+                                  }`}
+                                  title={isJan ? "Enero: Al colocar o modificar este valor se replica a todos los meses (1-12)" : `${mName}: Modificación individual`}
+                                >
+                                  <div className="flex items-center justify-end space-x-1">
+                                    <span>{mName.slice(0, 3)}</span>
+                                    {isJan && (
+                                      <span className="text-[10px] bg-indigo-600 text-white font-bold px-1 rounded shadow-xs" title="Replicador automático">
+                                        ⇶
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className={`text-[11px] ${isJan ? 'text-indigo-600 font-semibold' : 'text-slate-400 font-normal'}`}>
+                                    {isJan ? 'Replica 1-12' : `Mes ${idx + 1}`}
+                                  </div>
+                                </th>
+                              );
+                            })}
+                            <th className="py-3 px-3 text-right min-w-[130px] bg-slate-200/80 text-slate-900 font-bold">
+                              Total Anual
+                            </th>
+                          </tr>
+                        </thead>
+
+                        <tbody className="divide-y divide-slate-100 font-mono">
+                          {data.categories.map(cat => (
+                            <React.Fragment key={cat.id}>
+                              
+                              {/* FILA DE CATEGORÍA */}
+                              <tr className="bg-slate-50/90 font-sans border-t-2 border-slate-200">
+                                
+                                {/* Columna Proveedor para Categoría */}
+                                <td className="py-2.5 px-3 border-r border-slate-200 text-slate-400 text-xs italic">
+                                  —
+                                </td>
+
+                                {/* Columna Categoría */}
+                                <td className="py-2.5 px-3 border-r border-slate-200 flex items-center justify-between">
+                                  <div className="flex items-center space-x-2">
+                                    <span className="font-bold text-slate-900 text-sm">
+                                      📁 {cat.name}
+                                    </span>
+                                    <span className="text-xs text-slate-400 font-normal">
+                                      ({cat.accounts.length} cuentas)
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center space-x-1.5">
+                                    <button
+                                      onClick={() => {
+                                        setTargetCategoryId(cat.id);
+                                        setIsAccountModalOpen(true);
+                                      }}
+                                      title="Agregar cuenta a esta categoría"
+                                      className="text-xs text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded font-semibold border border-indigo-200 transition"
+                                    >
+                                      + Cuenta
+                                    </button>
+                                    <button
+                                      onClick={() => setEditingCategory(cat)}
+                                      title="Modificar categoría"
+                                      className="text-xs text-slate-400 hover:text-indigo-600 px-1.5 py-1 rounded hover:bg-slate-200 transition"
+                                    >
+                                      ✏️
+                                    </button>
+                                    <button
+                                      onClick={() => handleDeleteCategory(cat.id, cat.name)}
+                                      title="Eliminar categoría"
+                                      className="text-xs text-rose-500 hover:text-rose-700 px-1 py-0.5 rounded hover:bg-slate-200 transition"
+                                    >
+                                      ✕
+                                    </button>
+                                  </div>
+                                </td>
+
+                                {/* Totales Mensuales de la Categoría (Requerimiento 3) */}
+                                {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
+                                  <td
+                                    key={m}
+                                    className={`py-2.5 px-2 text-right border-r border-slate-200 font-bold font-mono text-sm ${
+                                      m === 1 ? 'bg-indigo-50/30 text-indigo-950' : 'text-slate-800'
+                                    }`}
+                                  >
+                                    {formatMoney(cat.monthly_totals[m] || '0.00')}
+                                  </td>
+                                ))}
+
+                                {/* Total Anual de la Categoría (Requerimiento 4) */}
+                                <td className="py-2.5 px-3 text-right bg-slate-100 font-bold text-indigo-900 font-mono text-sm">
+                                  {formatMoney(cat.annual_total || '0.00')}
+                                </td>
+                              </tr>
+
+                              {/* FILAS DE CUENTAS */}
+                              {cat.accounts.length === 0 ? (
+                                <tr>
+                                  <td colSpan={15} className="py-2.5 px-3 pl-8 text-slate-400 font-sans italic text-xs">
+                                    No hay cuentas en esta categoría.{' '}
+                                    <button
+                                      onClick={() => {
+                                        setTargetCategoryId(cat.id);
+                                        setIsAccountModalOpen(true);
+                                      }}
+                                      className="text-indigo-600 underline font-medium"
+                                    >
+                                      Agregar cuenta ahora
+                                    </button>
+                                  </td>
+                                </tr>
+                              ) : (
+                                cat.accounts.map(acc => (
+                                  <tr key={acc.id} className="hover:bg-indigo-50/30 transition-colors">
+                                    
+                                    {/* 1. Proveedor de la Cuenta (A la izquierda) */}
+                                    <td className="py-2 px-3 border-r border-slate-200 font-sans text-slate-600 text-sm truncate" title={acc.provider || ''}>
+                                      {acc.provider ? (
+                                        <span className="inline-block bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-xs border border-slate-200">
+                                          {acc.provider}
+                                        </span>
+                                      ) : (
+                                        <span className="text-slate-300 italic text-xs">—</span>
+                                      )}
+                                    </td>
+
+                                    {/* 2. Nombre de la Cuenta y Acciones */}
+                                    <td className="py-2 px-3 pl-6 border-r border-slate-200 font-sans flex items-center justify-between">
+                                      <span className="font-medium text-slate-800 text-sm">
+                                        • {acc.name}
+                                      </span>
+                                      <div className="flex items-center space-x-1">
+                                        <button
+                                          onClick={() => setEditingAccount(acc)}
+                                          title="Modificar cuenta"
+                                          className="text-xs text-slate-400 hover:text-indigo-600 px-1 py-0.5 rounded hover:bg-slate-100 transition"
+                                        >
+                                          ✏️
+                                        </button>
+                                        <button
+                                          onClick={() => handleDeleteAccount(acc.id, acc.name)}
+                                          title="Eliminar cuenta"
+                                          className="text-xs text-slate-300 hover:text-rose-600 px-1 py-0.5 rounded hover:bg-slate-100 transition"
+                                        >
+                                          ✕
+                                        </button>
+                                      </div>
+                                    </td>
+
+                                    {/* 12 Meses Editables de Gastos (Requerimiento 1: Total mensual cuenta) */}
+                                    {Array.from({ length: 12 }, (_, i) => i + 1).map(m => {
+                                      const isJan = m === 1;
+                                      return (
+                                        <td
+                                          key={m}
+                                          className={`p-0 border-r border-slate-200 ${
+                                            isJan ? 'bg-indigo-50/25' : ''
+                                          }`}
+                                        >
+                                          <input
+                                            type="text"
+                                            value={acc.months[m] ?? '0.00'}
+                                            onFocus={(e) => e.target.select()}
+                                            onChange={(e) => handleCellChange(acc.id, m, e.target.value)}
+                                            onBlur={(e) => handleBlur(acc.id, m, e.target.value)}
+                                            onKeyDown={(e) => {
+                                              if (e.key === 'Enter') e.target.blur();
+                                            }}
+                                            title={
+                                              isJan
+                                                ? 'Enero: Al ingresar o cambiar este valor se replica a todo el año (Feb-Dic). Presiona Enter o Tab al terminar.'
+                                                : `${MONTH_NAMES[m - 1]}: Modificación individual para este mes`
+                                            }
+                                            aria-label={`${acc.name} - ${MONTH_NAMES[m - 1]}`}
+                                            className={`w-full h-9 px-2 text-right bg-transparent text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-sm hover:bg-slate-50/80 transition-colors ${
+                                              isJan ? 'font-semibold text-indigo-950' : ''
+                                            }`}
+                                          />
+                                        </td>
+                                      );
+                                    })}
+
+                                    {/* Total Anual de la Cuenta (Requerimiento 2) */}
+                                    <td className="py-2 px-3 text-right font-bold text-slate-800 bg-slate-50/50 text-sm">
+                                      {formatMoney(acc.annual_total || '0.00')}
+                                    </td>
+                                  </tr>
+                                ))
+                              )}
+
+                            </React.Fragment>
+                          ))}
+                        </tbody>
+
+                        {/* PIE DE TABLA: TOTALES GENERALES (Requerimientos 5 y 6) */}
+                        <tfoot className="bg-slate-900 text-white font-mono sticky bottom-0 z-20 shadow-lg">
+                          <tr>
+                            <td className="py-3.5 px-3 border-r border-slate-700 font-sans font-bold text-sm text-slate-300 uppercase tracking-wider">
+                              TOTAL GENERAL
+                            </td>
+
+                            <td className="py-3.5 px-3 border-r border-slate-700 font-sans font-semibold text-sm">
+                              {data.is_balanced ? (
+                                <span className="text-xs text-emerald-400 font-semibold bg-emerald-950 px-2 py-0.5 rounded border border-emerald-800">
+                                  ✓ Cuadre Verificado
+                                </span>
+                              ) : (
+                                <span className="text-xs text-rose-400 font-semibold bg-rose-950 px-2 py-0.5 rounded border border-rose-800">
+                                  ⚠ Descuadre
+                                </span>
+                              )}
+                            </td>
+
+                            {/* 5. Total mensual general */}
+                            {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
+                              <td key={m} className="py-3.5 px-2 text-right border-r border-slate-700 font-bold text-amber-300 text-sm">
+                                {formatMoney(data.general_monthly_totals[m] || '0.00')}
+                              </td>
+                            ))}
+
+                            {/* 6. Total anual general */}
+                            <td className="py-3.5 px-3 text-right font-bold text-emerald-400 bg-slate-950 text-base">
+                              {formatMoney(data.general_annual_total || '0.00')}
+                            </td>
+                          </tr>
+                        </tfoot>
+
+                      </table>
+                    </div>
+
+                    {/* Barra Flotante de Guardado */}
+                    {pendingChanges.size > 0 && (
+                      <div className="fixed bottom-5 left-1/2 transform -translate-x-1/2 z-40 bg-slate-900 text-white px-5 py-3 rounded-xl shadow-2xl border border-slate-700 flex items-center space-x-4">
+                        <div className="flex items-center space-x-2">
+                          <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
+                          <span className="text-sm font-semibold text-amber-300">
+                            {pendingChanges.size} gasto(s) modificado(s)
+                          </span>
+                        </div>
+
+                        <div className="h-4 w-px bg-slate-700" />
+
+                        <div className="flex items-center space-x-2">
+                          <button
+                            onClick={handleSaveExpenses}
+                            disabled={isSaving}
+                            className="bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold px-4 py-1.5 rounded-lg shadow transition disabled:opacity-50"
+                          >
+                            {isSaving ? 'Guardando...' : 'Guardar Gastos'}
+                          </button>
+                          <button
+                            onClick={handleDiscard}
+                            className="text-sm text-slate-400 hover:text-white px-2 py-1.5"
+                          >
+                            Descartar
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                  </div>
+                )}
+
+              </div>
+            )}
+
+          </main>
+
+          {/* Modal para Crear Categoría */}
+          {isCategoryModalOpen && (
+            <CategoryModal
+              onClose={() => setIsCategoryModalOpen(false)}
+              onSuccess={() => {
+                showToast("Categoría creada");
+                loadSummary();
+              }}
+            />
+          )}
+
+          {/* Modal para Crear Cuenta */}
+          {isAccountModalOpen && (
+            <AccountModal
+              categories={data?.categories || []}
+              preselectedCategoryId={targetCategoryId}
+              onClose={() => {
+                setIsAccountModalOpen(false);
+                setTargetCategoryId(null);
+              }}
+              onSuccess={() => {
+                showToast("Cuenta creada");
+                loadSummary();
+              }}
+            />
+          )}
+
+          {/* Modal para Modificar Cuenta */}
+          {editingAccount && (
+            <EditAccountModal
+              account={editingAccount}
+              categories={data?.categories || []}
+              onClose={() => setEditingAccount(null)}
+              onSuccess={() => {
+                showToast("Cuenta modificada correctamente");
+                loadSummary();
+              }}
+            />
+          )}
+
+          {/* Modal para Modificar Categoría */}
+          {editingCategory && (
+            <EditCategoryModal
+              category={editingCategory}
+              onClose={() => setEditingCategory(null)}
+              onSuccess={() => {
+                showToast("Categoría modificada correctamente");
+                loadSummary();
+              }}
+            />
+          )}
+
+        </div>
+      );
+    }
+
+    // Modal Crear Categoría
+    function CategoryModal({ onClose, onSuccess }) {
+      const [name, setName] = useState('');
+      const [error, setError] = useState('');
+      const [submitting, setSubmitting] = useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!name.trim()) return;
+        setSubmitting(true);
+        setError('');
+        try {
+          const res = await fetch('/api/categories', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name.trim() })
+          });
+          if (!res.ok) {
+            const d = await res.json();
+            throw new Error(d.detail || "Error al crear categoría");
+          }
+          onSuccess();
+          onClose();
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setSubmitting(false);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 border border-slate-200 text-sm">
+            <h3 className="text-base font-bold text-slate-800 mb-3">Crear Nueva Categoría</h3>
+            {error && <div className="bg-rose-50 text-rose-700 p-2.5 rounded-lg mb-3 text-xs">{error}</div>}
+            <form onSubmit={handleSubmit} className="space-y-3.5">
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700">Nombre de la Categoría</label>
+                <input
+                  required
+                  type="text"
+                  placeholder="Ej. Recursos Humanos, Gastos Operativos..."
+                  value={name}
+                  onChange={e => setName(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                />
+              </div>
+              <div className="pt-2 flex justify-end space-x-2">
+                <button type="button" onClick={onClose} className="px-3.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-600 font-medium">Cancelar</button>
+                <button type="submit" disabled={submitting} className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow transition disabled:opacity-50">
+                  {submitting ? 'Creando...' : 'Crear Categoría'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    // Modal Modificar Categoría
+    function EditCategoryModal({ category, onClose, onSuccess }) {
+      const [name, setName] = useState(category.name);
+      const [error, setError] = useState('');
+      const [submitting, setSubmitting] = useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!name.trim()) return;
+        setSubmitting(true);
+        setError('');
+        try {
+          const res = await fetch(`/api/categories/${category.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name.trim() })
+          });
+          if (!res.ok) {
+            const d = await res.json().catch(() => ({}));
+            throw new Error(d.detail || "Error al modificar la categoría");
+          }
+          onSuccess();
+          onClose();
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setSubmitting(false);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 border border-slate-200 text-sm">
+            <h3 className="text-base font-bold text-slate-800 mb-3">Modificar Categoría</h3>
+            {error && <div className="bg-rose-50 text-rose-700 p-2.5 rounded-lg mb-3 text-xs">{error}</div>}
+            <form onSubmit={handleSubmit} className="space-y-3.5">
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700">Nombre de la Categoría</label>
+                <input
+                  required
+                  type="text"
+                  value={name}
+                  onChange={e => setName(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                />
+              </div>
+              <div className="pt-2 flex justify-end space-x-2">
+                <button type="button" onClick={onClose} className="px-3.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-600 font-medium">Cancelar</button>
+                <button type="submit" disabled={submitting} className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow transition disabled:opacity-50">
+                  {submitting ? 'Guardando...' : 'Guardar Cambios'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    // Modal Crear Cuenta
+    function AccountModal({ categories, preselectedCategoryId, onClose, onSuccess }) {
+      const [categoryId, setCategoryId] = useState(preselectedCategoryId || categories[0]?.id || '');
+      const [name, setName] = useState('');
+      const [provider, setProvider] = useState('');
+      const [error, setError] = useState('');
+      const [submitting, setSubmitting] = useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!name.trim() || !categoryId) return;
+        setSubmitting(true);
+        setError('');
+        try {
+          const res = await fetch(`/api/categories/${categoryId}/accounts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name.trim(), provider: provider.trim() })
+          });
+          if (!res.ok) {
+            const d = await res.json();
+            throw new Error(d.detail || "Error al crear cuenta");
+          }
+          onSuccess();
+          onClose();
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setSubmitting(false);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 border border-slate-200 text-sm">
+            <h3 className="text-base font-bold text-slate-800 mb-3">Crear Cuenta dentro de Categoría</h3>
+            {error && <div className="bg-rose-50 text-rose-700 p-2.5 rounded-lg mb-3 text-xs">{error}</div>}
+            <form onSubmit={handleSubmit} className="space-y-3.5">
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700">Categoría</label>
+                <select
+                  value={categoryId}
+                  onChange={e => setCategoryId(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                >
+                  {categories.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700">Proveedor (Opcional)</label>
+                <input
+                  type="text"
+                  placeholder="Ej. AWS, Cirion, KMSolutions..."
+                  value={provider}
+                  onChange={e => setProvider(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700">Nombre de la Cuenta</label>
+                <input
+                  required
+                  type="text"
+                  placeholder="Ej. Sueldos, Publicidad Digital, Mantenimiento..."
+                  value={name}
+                  onChange={e => setName(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                />
+              </div>
+              <div className="pt-2 flex justify-end space-x-2">
+                <button type="button" onClick={onClose} className="px-3.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-600 font-medium">Cancelar</button>
+                <button type="submit" disabled={submitting} className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow transition disabled:opacity-50">
+                  {submitting ? 'Creando...' : 'Crear Cuenta'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    // Modal Modificar Cuenta
+    function EditAccountModal({ account, categories, onClose, onSuccess }) {
+      const [name, setName] = useState(account.name);
+      const [provider, setProvider] = useState(account.provider || '');
+      const [categoryId, setCategoryId] = useState(account.category_id || categories[0]?.id || '');
+      const [error, setError] = useState('');
+      const [submitting, setSubmitting] = useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!name.trim()) return;
+        setSubmitting(true);
+        setError('');
+        try {
+          const res = await fetch(`/api/accounts/${account.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: name.trim(),
+              provider: provider.trim(),
+              category_id: Number(categoryId)
+            })
+          });
+          if (!res.ok) {
+            const d = await res.json().catch(() => ({}));
+            throw new Error(d.detail || "Error al modificar la cuenta");
+          }
+          onSuccess();
+          onClose();
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setSubmitting(false);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 border border-slate-200 text-sm">
+            <h3 className="text-base font-bold text-slate-800 mb-3">Modificar Cuenta Presupuestaria</h3>
+            {error && <div className="bg-rose-50 text-rose-700 p-2.5 rounded-lg mb-3 text-xs">{error}</div>}
+            <form onSubmit={handleSubmit} className="space-y-3.5">
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700">Categoría</label>
+                <select
+                  value={categoryId}
+                  onChange={e => setCategoryId(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                >
+                  {categories.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700">Proveedor</label>
+                <input
+                  type="text"
+                  placeholder="Ej. AWS, Cirion, KMSolutions..."
+                  value={provider}
+                  onChange={e => setProvider(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700">Nombre de la Cuenta</label>
+                <input
+                  required
+                  type="text"
+                  placeholder="Ej. Sueldos, Publicidad Digital, Mantenimiento..."
+                  value={name}
+                  onChange={e => setName(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                />
+              </div>
+              <div className="pt-2 flex justify-end space-x-2">
+                <button type="button" onClick={onClose} className="px-3.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-600 font-medium">Cancelar</button>
+                <button type="submit" disabled={submitting} className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow transition disabled:opacity-50">
+                  {submitting ? 'Guardando...' : 'Guardar Cambios'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

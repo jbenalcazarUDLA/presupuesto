@@ -1,0 +1,930 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Planificador de Presupuesto Anual</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React 18 & Babel Standalone -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 antialiased selection:bg-indigo-500 selection:text-white">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useMemo } = React;
+
+    const MONTH_NAMES = [
+      'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+      'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+    ];
+
+    // --- Utilidades Matemáticas Exactas en Centavos ---
+    function parseToCents(value) {
+      if (value === undefined || value === null || value === '') return 0;
+      const cleaned = String(value).replace(/[^0-9.-]/g, '').trim();
+      if (!cleaned || isNaN(Number(cleaned))) return 0;
+      const parts = cleaned.split('.');
+      const intPart = parseInt(parts[0] || '0', 10);
+      let decPart = parts[1] || '';
+      if (decPart.length === 1) decPart += '0';
+      else if (decPart.length > 2) decPart = decPart.substring(0, 2);
+      else if (decPart.length === 0) decPart = '00';
+      const sign = cleaned.startsWith('-') ? -1 : 1;
+      const absInt = Math.abs(intPart);
+      return sign * (absInt * 100 + parseInt(decPart, 10));
+    }
+
+    function centsToString(cents) {
+      const isNegative = cents < 0;
+      const abs = Math.abs(cents);
+      const intVal = Math.floor(abs / 100);
+      const decVal = abs % 100;
+      const decStr = decVal < 10 ? `0${decVal}` : `${decVal}`;
+      return `${isNegative ? '-' : ''}${intVal}.${decStr}`;
+    }
+
+    function formatCurrency(val) {
+      const cents = parseToCents(val);
+      const isNegative = cents < 0;
+      const abs = Math.abs(cents);
+      const intVal = Math.floor(abs / 100);
+      const decVal = abs % 100;
+      const formattedInt = intVal.toLocaleString('es-EC');
+      const decStr = decVal < 10 ? `0${decVal}` : `${decVal}`;
+      return `${isNegative ? '-$' : '$'}${formattedInt}.${decStr}`;
+    }
+
+    function recalculateMatrixLocally(matrix) {
+      const newMatrix = JSON.parse(JSON.stringify(matrix));
+      const generalMonthlyCents = {};
+      for (let m = 1; m <= 12; m++) generalMonthlyCents[m] = 0;
+      let generalAnnualCents = 0;
+
+      newMatrix.categories.forEach(cat => {
+        const catMonthlyCents = {};
+        for (let m = 1; m <= 12; m++) catMonthlyCents[m] = 0;
+        let catAnnualCents = 0;
+
+        cat.accounts.forEach(acc => {
+          let accAnnualCents = 0;
+          for (let m = 1; m <= 12; m++) {
+            const monthCents = Math.max(0, parseToCents(acc.months[m] || '0.00'));
+            acc.months[m] = centsToString(monthCents);
+            accAnnualCents += monthCents;
+            catMonthlyCents[m] += monthCents;
+          }
+          acc.annual_total = centsToString(accAnnualCents);
+          catAnnualCents += accAnnualCents;
+        });
+
+        cat.annual_total = centsToString(catAnnualCents);
+        for (let m = 1; m <= 12; m++) {
+          cat.monthly_totals[m] = centsToString(catMonthlyCents[m]);
+          generalMonthlyCents[m] += catMonthlyCents[m];
+        }
+        generalAnnualCents += catAnnualCents;
+      });
+
+      for (let m = 1; m <= 12; m++) {
+        newMatrix.general_monthly_totals[m] = centsToString(generalMonthlyCents[m]);
+      }
+      newMatrix.general_annual_total = centsToString(generalAnnualCents);
+
+      let sumMonthlyGenerals = 0;
+      for (let m = 1; m <= 12; m++) sumMonthlyGenerals += generalMonthlyCents[m];
+      newMatrix.is_balanced = (sumMonthlyGenerals === generalAnnualCents);
+
+      return newMatrix;
+    }
+
+    // --- Componente Principal App ---
+    function App() {
+      const [years, setYears] = useState([]);
+      const [selectedYear, setSelectedYear] = useState(2026);
+      const [matrix, setMatrix] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+
+      const [modifiedCells, setModifiedCells] = useState(new Map());
+      const [modifiedBy, setModifiedBy] = useState('amoreno');
+      const [changeReason, setChangeReason] = useState('');
+      const [isSaving, setIsSaving] = useState(false);
+      const [toast, setToast] = useState(null);
+
+      // Modales
+      const [auditOpen, setAuditOpen] = useState(false);
+      const [catModalOpen, setCatModalOpen] = useState(false);
+      const [accModalOpen, setAccModalOpen] = useState(false);
+      const [yearModalOpen, setYearModalOpen] = useState(false);
+
+      const [collapsedCategories, setCollapsedCategories] = useState({});
+
+      const showToast = (msg) => {
+        setToast(msg);
+        setTimeout(() => setToast(null), 3500);
+      };
+
+      const loadYears = async () => {
+        try {
+          const res = await fetch('/api/v1/years');
+          if (res.ok) {
+            const data = await res.json();
+            setYears(data);
+          }
+        } catch (e) {
+          console.error("Error al cargar años", e);
+        }
+      };
+
+      const loadMatrix = useCallback(async (yr) => {
+        setLoading(true);
+        setError(null);
+        try {
+          const res = await fetch(`/api/v1/budgets/${yr}/matrix`);
+          if (!res.ok) throw new Error("No se pudo cargar la matriz del año " + yr);
+          const data = await res.json();
+          setMatrix(data);
+          setModifiedCells(new Map());
+        } catch (e) {
+          setError(e.message);
+        } finally {
+          setLoading(false);
+        }
+      }, []);
+
+      useEffect(() => {
+        loadYears();
+      }, []);
+
+      useEffect(() => {
+        if (selectedYear) {
+          loadMatrix(selectedYear);
+        }
+      }, [selectedYear, loadMatrix]);
+
+      const handleCellChange = (accountId, month, val) => {
+        if (!matrix) return;
+        if (val !== '' && !/^[0-9]*\.?[0-9]{0,2}$/.test(val)) return;
+
+        const updated = JSON.parse(JSON.stringify(matrix));
+        for (const cat of updated.categories) {
+          const acc = cat.accounts.find(a => a.id === accountId);
+          if (acc) {
+            acc.months[month] = val;
+            break;
+          }
+        }
+
+        const recalculated = recalculateMatrixLocally(updated);
+        setMatrix(recalculated);
+
+        const key = `${accountId}-${month}`;
+        setModifiedCells(prev => {
+          const next = new Map(prev);
+          next.set(key, { account_id: accountId, month: month, amount: val });
+          return next;
+        });
+      };
+
+      const handleBlur = (accountId, month, val) => {
+        const cents = Math.max(0, parseToCents(val));
+        const formatted = (cents / 100).toFixed(2);
+        handleCellChange(accountId, month, formatted);
+      };
+
+      const handleSave = async () => {
+        if (modifiedCells.size === 0 || !matrix) return;
+        setIsSaving(true);
+        try {
+          const updates = Array.from(modifiedCells.values()).map(u => ({
+            account_id: u.account_id,
+            month: u.month,
+            amount: centsToString(Math.max(0, parseToCents(u.amount)))
+          }));
+
+          const payload = {
+            modified_by: modifiedBy.trim() || 'amoreno',
+            reason: changeReason.trim() || 'Ajuste de proyección',
+            updates: updates
+          };
+
+          const res = await fetch(`/api/v1/budgets/${selectedYear}/projections`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+
+          if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.detail || "Error al guardar");
+          }
+
+          const fresh = await res.json();
+          setMatrix(fresh);
+          setModifiedCells(new Map());
+          setChangeReason('');
+          showToast(`¡Se guardaron y auditaron ${updates.length} cambios exitosamente!`);
+        } catch (e) {
+          alert("Error al guardar: " + e.message);
+        } finally {
+          setIsSaving(false);
+        }
+      };
+
+      const handleDiscard = () => {
+        if (confirm("¿Descartar cambios no guardados?")) {
+          loadMatrix(selectedYear);
+        }
+      };
+
+      const toggleCategory = (id) => {
+        setCollapsedCategories(prev => ({ ...prev, [id]: !prev[id] }));
+      };
+
+      const handleChangeStatus = async (st) => {
+        try {
+          const res = await fetch(`/api/v1/budgets/${selectedYear}/status?new_status=${st}`, { method: 'PUT' });
+          if (res.ok) {
+            showToast(`Estado actualizado a ${st}`);
+            loadYears();
+            loadMatrix(selectedYear);
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      };
+
+      return (
+        <div className="min-h-screen flex flex-col bg-slate-50">
+          
+          {/* Toast */}
+          {toast && (
+            <div className="fixed top-18 right-6 z-50 bg-emerald-700 text-white text-xs font-semibold px-4 py-3 rounded-xl shadow-xl flex items-center space-x-2">
+              <span>✓</span>
+              <span>{toast}</span>
+            </div>
+          )}
+
+          {/* Barra de Navegación Superior */}
+          <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
+            <div className="max-w-[1920px] mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+              
+              <div className="flex items-center space-x-3">
+                <div className="w-9 h-9 rounded-lg bg-indigo-600 flex items-center justify-center text-white font-bold shadow-md shadow-indigo-100">
+                  📊
+                </div>
+                <div>
+                  <h1 className="text-sm font-bold text-slate-900 leading-tight">Planificador Presupuestario</h1>
+                  <p className="text-[11px] text-slate-500 font-medium">Proyección Anual • Tecnología EDIMCA</p>
+                </div>
+              </div>
+
+              {/* Selector de Año y Estado */}
+              <div className="flex items-center space-x-3">
+                <div className="flex items-center bg-slate-100 p-1 rounded-lg border border-slate-200">
+                  <span className="text-xs font-semibold text-slate-500 px-2">AÑO:</span>
+                  <select
+                    value={selectedYear}
+                    onChange={(e) => setSelectedYear(Number(e.target.value))}
+                    aria-label="Seleccionar año fiscal"
+                    className="bg-white text-xs font-bold text-indigo-700 rounded-md px-3 py-1 shadow-sm border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    {years.map(y => (
+                      <option key={y.year} value={y.year}>{y.year}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex items-center space-x-1.5">
+                  <span className={`text-[11px] px-2.5 py-0.5 rounded-full border font-semibold tracking-wider ${
+                    matrix?.status === 'APPROVED' ? 'bg-emerald-100 text-emerald-800 border-emerald-300' :
+                    matrix?.status === 'CLOSED' ? 'bg-rose-100 text-rose-800 border-rose-300' :
+                    'bg-amber-100 text-amber-800 border-amber-300'
+                  }`}>
+                    {matrix?.status || 'DRAFT'}
+                  </span>
+                  <select
+                    value={matrix?.status || 'DRAFT'}
+                    onChange={(e) => handleChangeStatus(e.target.value)}
+                    aria-label="Cambiar estado del presupuesto"
+                    className="text-xs bg-slate-50 border border-slate-200 text-slate-600 rounded px-1.5 py-0.5 hover:bg-slate-100 cursor-pointer"
+                  >
+                    <option value="DRAFT">Borrador</option>
+                    <option value="APPROVED">Aprobar</option>
+                    <option value="CLOSED">Cerrar</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Botones de Acción */}
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => setAuditOpen(true)}
+                  className="text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-md border border-slate-300 transition flex items-center space-x-1"
+                >
+                  <span>📜</span>
+                  <span>Auditoría</span>
+                </button>
+                <div className="h-4 w-px bg-slate-200" />
+                <button
+                  onClick={() => setAccModalOpen(true)}
+                  className="text-xs font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-md border border-indigo-200 transition"
+                >
+                  + Cuenta
+                </button>
+                <button
+                  onClick={() => setCatModalOpen(true)}
+                  className="text-xs font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-md border border-indigo-200 transition"
+                >
+                  + Categoría
+                </button>
+                <button
+                  onClick={() => setYearModalOpen(true)}
+                  className="text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 px-3 py-1.5 rounded-md shadow-sm transition"
+                >
+                  + Nuevo Año
+                </button>
+              </div>
+
+            </div>
+          </header>
+
+          {/* Contenido Principal */}
+          <main className="flex-1 max-w-[1920px] w-full mx-auto px-4 sm:px-6 py-4">
+            
+            {/* Banner de Información */}
+            {matrix && (
+              <div className="mb-4 bg-white p-3.5 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div className="flex items-center space-x-4">
+                  <div>
+                    <span className="text-slate-400 font-medium">Año Fiscal:</span>{' '}
+                    <span className="font-bold text-slate-800">{matrix.year}</span>
+                  </div>
+                  <div className="h-3 w-px bg-slate-200" />
+                  <div>
+                    <span className="text-slate-400 font-medium">Categorías:</span>{' '}
+                    <span className="font-semibold text-slate-700">{matrix.categories.length}</span>
+                  </div>
+                  <div className="h-3 w-px bg-slate-200" />
+                  <div>
+                    <span className="text-slate-400 font-medium">Cuentas:</span>{' '}
+                    <span className="font-semibold text-slate-700">
+                      {matrix.categories.reduce((a, c) => a + c.accounts.length, 0)}
+                    </span>
+                  </div>
+                  {matrix.notes && (
+                    <>
+                      <div className="h-3 w-px bg-slate-200" />
+                      <span className="text-slate-500 italic max-w-lg truncate">"{matrix.notes}"</span>
+                    </>
+                  )}
+                </div>
+
+                <div className="flex items-center space-x-2">
+                  <span className="text-slate-500">Total Proyectado Anual:</span>
+                  <span className="text-base font-extrabold text-indigo-700 font-mono">
+                    {formatCurrency(matrix.general_annual_total)}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Loading / Error */}
+            {loading && (
+              <div className="py-24 text-center">
+                <div className="inline-block animate-spin rounded-full h-8 w-8 border-4 border-indigo-600 border-t-transparent"></div>
+                <p className="mt-3 text-slate-500 text-xs">Calculando y cargando matriz...</p>
+              </div>
+            )}
+
+            {error && (
+              <div className="bg-rose-50 border border-rose-200 text-rose-700 p-4 rounded-xl text-xs font-medium">
+                {error}
+              </div>
+            )}
+
+            {/* Matriz Presupuestaria Tabular */}
+            {!loading && matrix && (
+              <div className="relative pb-24">
+                <div className="overflow-x-auto shadow-sm rounded-xl border border-slate-200 bg-white">
+                  <table className="w-full text-left border-collapse text-xs">
+                    
+                    {/* Encabezado */}
+                    <thead className="bg-slate-100 text-slate-700 sticky top-16 z-20 shadow-[0_1px_3px_rgba(0,0,0,0.05)] font-semibold">
+                      <tr>
+                        <th className="py-2.5 px-3 min-w-[300px] border-r border-slate-200">Categoría / Cuenta</th>
+                        <th className="py-2.5 px-2 w-[120px] border-r border-slate-200 text-slate-500">Responsable</th>
+                        {MONTH_NAMES.map((mName, idx) => (
+                          <th key={mName} className="py-2.5 px-2 text-right min-w-[95px] border-r border-slate-200">
+                            <div>{mName.slice(0, 3)}</div>
+                            <div className="text-[10px] text-slate-400 font-normal">Mes {idx + 1}</div>
+                          </th>
+                        ))}
+                        <th className="py-2.5 px-3 text-right min-w-[120px] bg-slate-200/80 text-slate-900 font-bold">Total Anual</th>
+                      </tr>
+                    </thead>
+
+                    <tbody className="divide-y divide-slate-100 font-mono">
+                      {matrix.categories.map(cat => {
+                        const isCollapsed = !!collapsedCategories[cat.id];
+                        return (
+                          <React.Fragment key={cat.id}>
+                            {/* Fila Categoría */}
+                            <tr className="bg-slate-50 hover:bg-slate-100/90 font-sans border-t-2 border-slate-200 transition-colors">
+                              <td className="py-2.5 px-3 border-r border-slate-200">
+                                <button
+                                  onClick={() => toggleCategory(cat.id)}
+                                  className="flex items-center space-x-2 text-left w-full focus:outline-none"
+                                >
+                                  <span className="text-slate-400">{isCollapsed ? '▶' : '▼'}</span>
+                                  <span className="font-bold text-slate-800 text-xs">{cat.name}</span>
+                                  <span className="text-[10px] text-slate-400 bg-white px-1.5 py-0.5 rounded border border-slate-200">{cat.code}</span>
+                                  <span className="text-[10px] text-slate-400">({cat.accounts.length})</span>
+                                </button>
+                              </td>
+                              <td className="py-2.5 px-2 border-r border-slate-200 text-slate-400 text-[11px] italic">
+                                Subtotales
+                              </td>
+                              {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
+                                <td key={m} className="py-2.5 px-2 text-right border-r border-slate-200 font-semibold text-slate-800">
+                                  {formatCurrency(cat.monthly_totals[m] || '0.00')}
+                                </td>
+                              ))}
+                              <td className="py-2.5 px-3 text-right bg-slate-100/80 font-bold text-indigo-900">
+                                {formatCurrency(cat.annual_total || '0.00')}
+                              </td>
+                            </tr>
+
+                            {/* Cuentas */}
+                            {!isCollapsed && cat.accounts.map(acc => (
+                              <tr key={acc.id} className="hover:bg-indigo-50/40 transition-colors">
+                                <td className="py-1.5 px-3 pl-8 border-r border-slate-200 font-sans">
+                                  <div className="font-medium text-slate-800 text-xs">{acc.name}</div>
+                                  <div className="text-[10px] text-slate-400">
+                                    {acc.code ? `Cod: ${acc.code}` : ''} {acc.provider ? `• Prov: ${acc.provider}` : ''}
+                                  </div>
+                                </td>
+                                <td className="py-1.5 px-2 border-r border-slate-200 text-[11px] text-slate-500 font-sans truncate">
+                                  {acc.responsible || '—'}
+                                </td>
+                                {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
+                                  <td key={m} className="p-0 border-r border-slate-200">
+                                    <input
+                                      type="text"
+                                      value={acc.months[m] ?? '0.00'}
+                                      onChange={(e) => handleCellChange(acc.id, m, e.target.value)}
+                                      onBlur={(e) => handleBlur(acc.id, m, e.target.value)}
+                                      aria-label={`${acc.name} - Mes ${m}`}
+                                      className="w-full h-8 px-2 text-right bg-transparent text-slate-900 focus:bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500 text-xs hover:bg-slate-50/70"
+                                    />
+                                  </td>
+                                ))}
+                                <td className="py-1.5 px-3 text-right font-bold text-slate-800 bg-slate-50/50">
+                                  {formatCurrency(acc.annual_total || '0.00')}
+                                </td>
+                              </tr>
+                            ))}
+                          </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+
+                    {/* Totales Generales */}
+                    <tfoot className="bg-slate-900 text-white font-mono sticky bottom-0 z-20 shadow-lg">
+                      <tr>
+                        <td className="py-3 px-3 border-r border-slate-700 font-sans font-bold text-xs uppercase tracking-wider">
+                          <div className="flex items-center justify-between">
+                            <span>TOTAL MENSUAL GENERAL</span>
+                            {matrix.is_balanced ? (
+                              <span className="text-[10px] text-emerald-400 font-semibold bg-emerald-950 px-2 py-0.5 rounded border border-emerald-800">
+                                ✓ Cuadre Verificado
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-rose-400 font-semibold bg-rose-950 px-2 py-0.5 rounded border border-rose-800">
+                                ⚠ Descuadre
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-3 px-2 border-r border-slate-700 text-slate-400 text-[10px] font-sans">
+                          Consolidado
+                        </td>
+                        {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
+                          <td key={m} className="py-3 px-2 text-right border-r border-slate-700 font-bold text-amber-300">
+                            {formatCurrency(matrix.general_monthly_totals[m] || '0.00')}
+                          </td>
+                        ))}
+                        <td className="py-3 px-3 text-right font-bold text-emerald-400 bg-slate-950 text-sm">
+                          {formatCurrency(matrix.general_annual_total || '0.00')}
+                        </td>
+                      </tr>
+                    </tfoot>
+
+                  </table>
+                </div>
+
+                {/* Barra Flotante de Guardado */}
+                {modifiedCells.size > 0 && (
+                  <div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-40 bg-slate-900 text-white px-5 py-3 rounded-xl shadow-2xl border border-slate-700 flex items-center space-x-4">
+                    <div className="flex items-center space-x-2">
+                      <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
+                      <span className="text-xs font-semibold text-amber-300">
+                        {modifiedCells.size} celda(s) modificada(s)
+                      </span>
+                    </div>
+
+                    <div className="h-4 w-px bg-slate-700" />
+
+                    <div className="flex items-center space-x-1.5">
+                      <label className="text-[11px] text-slate-400">Usuario:</label>
+                      <input
+                        type="text"
+                        value={modifiedBy}
+                        onChange={(e) => setModifiedBy(e.target.value)}
+                        className="bg-slate-800 text-white text-xs px-2.5 py-1 rounded border border-slate-600 focus:outline-none w-28"
+                      />
+                    </div>
+
+                    <div className="flex items-center space-x-1.5">
+                      <label className="text-[11px] text-slate-400">Motivo:</label>
+                      <input
+                        type="text"
+                        placeholder="Ej. Ajuste contrato"
+                        value={changeReason}
+                        onChange={(e) => setChangeReason(e.target.value)}
+                        className="bg-slate-800 text-white text-xs px-2.5 py-1 rounded border border-slate-600 focus:outline-none w-44"
+                      />
+                    </div>
+
+                    <div className="flex items-center space-x-2">
+                      <button
+                        onClick={handleSave}
+                        disabled={isSaving}
+                        className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-1.5 rounded-lg shadow transition disabled:opacity-50"
+                      >
+                        {isSaving ? 'Guardando...' : 'Guardar y Auditar'}
+                      </button>
+                      <button
+                        onClick={handleDiscard}
+                        className="text-xs text-slate-400 hover:text-white px-2 py-1.5"
+                      >
+                        Descartar
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+              </div>
+            )}
+
+          </main>
+
+          {/* Modal de Auditoría */}
+          {auditOpen && (
+            <AuditModalComponent
+              year={selectedYear}
+              onClose={() => setAuditOpen(false)}
+            />
+          )}
+
+          {/* Modal Nueva Categoría */}
+          {catModalOpen && (
+            <CategoryModalComponent
+              onClose={() => setCatModalOpen(false)}
+              onSuccess={() => {
+                showToast("Categoría creada");
+                loadMatrix(selectedYear);
+              }}
+            />
+          )}
+
+          {/* Modal Nueva Cuenta */}
+          {accModalOpen && (
+            <AccountModalComponent
+              categories={matrix?.categories || []}
+              onClose={() => setAccModalOpen(false)}
+              onSuccess={() => {
+                showToast("Cuenta creada");
+                loadMatrix(selectedYear);
+              }}
+            />
+          )}
+
+          {/* Modal Nuevo Año */}
+          {yearModalOpen && (
+            <YearModalComponent
+              existingYears={years}
+              onClose={() => setYearModalOpen(false)}
+              onSuccess={(newYr) => {
+                showToast(`Año ${newYr} creado`);
+                loadYears();
+                setSelectedYear(newYr);
+              }}
+            />
+          )}
+
+        </div>
+      );
+    }
+
+    // --- Subcomponentes de Modales ---
+    function AuditModalComponent({ year, onClose }) {
+      const [logs, setLogs] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [filter, setFilter] = useState('');
+
+      useEffect(() => {
+        fetch(`/api/v1/budgets/${year}/audit?limit=250`)
+          .then(r => r.json())
+          .then(data => setLogs(data.items || []))
+          .finally(() => setLoading(false));
+      }, [year]);
+
+      const filtered = logs.filter(l => 
+        l.account_name.toLowerCase().includes(filter.toLowerCase()) ||
+        l.modified_by.toLowerCase().includes(filter.toLowerCase()) ||
+        (l.reason && l.reason.toLowerCase().includes(filter.toLowerCase()))
+      );
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col border border-slate-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-slate-800">Historial de Auditoría — Año {year}</h3>
+                <p className="text-[11px] text-slate-500">Trazabilidad de modificaciones de importes y justificaciones</p>
+              </div>
+              <button onClick={onClose} className="text-slate-400 hover:text-slate-600 font-bold p-1">✕</button>
+            </div>
+
+            <div className="px-6 py-2.5 border-b border-slate-100 flex items-center justify-between">
+              <input
+                type="text"
+                placeholder="Buscar por cuenta, usuario o motivo..."
+                value={filter}
+                onChange={e => setFilter(e.target.value)}
+                className="text-xs bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 w-72 focus:outline-none"
+              />
+              <span className="text-xs text-slate-500">Registros: {filtered.length}</span>
+            </div>
+
+            <div className="overflow-y-auto flex-1 p-6">
+              {loading ? (
+                <div className="text-center py-10 text-xs text-slate-400">Cargando auditoría...</div>
+              ) : filtered.length === 0 ? (
+                <div className="text-center py-10 text-xs text-slate-400">No hay registros de auditoría en este año fiscal.</div>
+              ) : (
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-slate-500 font-semibold bg-slate-50/50">
+                      <th className="py-2 px-3">Fecha</th>
+                      <th className="py-2 px-3">Usuario</th>
+                      <th className="py-2 px-3">Cuenta</th>
+                      <th className="py-2 px-2">Mes</th>
+                      <th className="py-2 px-3 text-right">Anterior</th>
+                      <th className="py-2 px-3 text-right">Nuevo</th>
+                      <th className="py-2 px-3">Motivo</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filtered.map(l => (
+                      <tr key={l.id} className="hover:bg-slate-50">
+                        <td className="py-2 px-3 font-mono text-[11px] text-slate-500 whitespace-nowrap">
+                          {new Date(l.created_at).toLocaleString('es-EC')}
+                        </td>
+                        <td className="py-2 px-3 font-semibold text-slate-700">
+                          <span className="bg-slate-100 px-2 py-0.5 rounded border border-slate-200 text-[11px]">
+                            {l.modified_by}
+                          </span>
+                        </td>
+                        <td className="py-2 px-3">
+                          <div className="font-medium text-slate-800">{l.account_name}</div>
+                          <div className="text-[10px] text-slate-400">{l.category_name}</div>
+                        </td>
+                        <td className="py-2 px-2 text-slate-600">
+                          {MONTH_NAMES[l.month - 1]}
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono text-slate-500">
+                          {formatCurrency(l.previous_amount)}
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono font-bold text-indigo-700">
+                          {formatCurrency(l.new_amount)}
+                        </td>
+                        <td className="py-2 px-3 text-slate-600 italic text-[11px]">
+                          {l.reason || '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div className="px-6 py-3 border-t border-slate-200 bg-slate-50 flex justify-end">
+              <button onClick={onClose} className="text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 px-4 py-1.5 rounded-lg border border-slate-300">
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function CategoryModalComponent({ onClose, onSuccess }) {
+      const [code, setCode] = useState('');
+      const [name, setName] = useState('');
+      const [displayOrder, setDisplayOrder] = useState(0);
+      const [error, setError] = useState('');
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        try {
+          const res = await fetch('/api/v1/categories', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: code.toUpperCase().trim(), name: name.trim(), display_order: displayOrder, is_active: true })
+          });
+          if (!res.ok) {
+            const d = await res.json();
+            throw new Error(d.detail || "Error");
+          }
+          onSuccess();
+          onClose();
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 border border-slate-200 text-xs">
+            <h3 className="text-sm font-bold text-slate-800 mb-3">Crear Nueva Categoría Dinámica</h3>
+            {error && <div className="bg-rose-50 text-rose-700 p-2 rounded mb-3">{error}</div>}
+            <form onSubmit={handleSubmit} className="space-y-3">
+              <div>
+                <label className="block font-semibold mb-1">Código</label>
+                <input required type="text" placeholder="Ej. CAT-SERVIDORES" value={code} onChange={e => setCode(e.target.value)} className="w-full bg-slate-50 border border-slate-300 rounded px-3 py-2 uppercase" />
+              </div>
+              <div>
+                <label className="block font-semibold mb-1">Nombre</label>
+                <input required type="text" placeholder="Ej. Infraestructura de Servidores" value={name} onChange={e => setName(e.target.value)} className="w-full bg-slate-50 border border-slate-300 rounded px-3 py-2" />
+              </div>
+              <div>
+                <label className="block font-semibold mb-1">Orden</label>
+                <input type="number" value={displayOrder} onChange={e => setDisplayOrder(Number(e.target.value))} className="w-full bg-slate-50 border border-slate-300 rounded px-3 py-2" />
+              </div>
+              <div className="pt-2 flex justify-end space-x-2">
+                <button type="button" onClick={onClose} className="px-3 py-1.5 rounded hover:bg-slate-100">Cancelar</button>
+                <button type="submit" className="px-4 py-1.5 bg-indigo-600 text-white font-semibold rounded">Crear</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    function AccountModalComponent({ categories, onClose, onSuccess }) {
+      const [catId, setCatId] = useState(categories[0]?.id || 1);
+      const [code, setCode] = useState('');
+      const [name, setName] = useState('');
+      const [responsible, setResponsible] = useState('');
+      const [provider, setProvider] = useState('');
+      const [order, setOrder] = useState(0);
+      const [error, setError] = useState('');
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        try {
+          const res = await fetch('/api/v1/accounts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ category_id: Number(catId), code, name, responsible, provider, display_order: order, is_active: true })
+          });
+          if (!res.ok) {
+            const d = await res.json();
+            throw new Error(d.detail || "Error");
+          }
+          onSuccess();
+          onClose();
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 border border-slate-200 text-xs">
+            <h3 className="text-sm font-bold text-slate-800 mb-3">Crear Nueva Cuenta Presupuestaria</h3>
+            {error && <div className="bg-rose-50 text-rose-700 p-2 rounded mb-3">{error}</div>}
+            <form onSubmit={handleSubmit} className="space-y-3">
+              <div>
+                <label className="block font-semibold mb-1">Categoría</label>
+                <select value={catId} onChange={e => setCatId(e.target.value)} aria-label="Seleccionar categoría" className="w-full bg-slate-50 border border-slate-300 rounded px-3 py-2">
+                  {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block font-semibold mb-1">Nombre de Cuenta</label>
+                <input required type="text" placeholder="Ej. Servidores Cloud AWS" value={name} onChange={e => setName(e.target.value)} className="w-full bg-slate-50 border border-slate-300 rounded px-3 py-2" />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block font-semibold mb-1">Código</label>
+                  <input type="text" placeholder="0039800" value={code} onChange={e => setCode(e.target.value)} className="w-full bg-slate-50 border border-slate-300 rounded px-3 py-2" />
+                </div>
+                <div>
+                  <label className="block font-semibold mb-1">Responsable</label>
+                  <input type="text" placeholder="amoreno" value={responsible} onChange={e => setResponsible(e.target.value)} className="w-full bg-slate-50 border border-slate-300 rounded px-3 py-2" />
+                </div>
+              </div>
+              <div>
+                <label className="block font-semibold mb-1">Proveedor</label>
+                <input type="text" placeholder="Ej. AWS / Cirion" value={provider} onChange={e => setProvider(e.target.value)} className="w-full bg-slate-50 border border-slate-300 rounded px-3 py-2" />
+              </div>
+              <div className="pt-2 flex justify-end space-x-2">
+                <button type="button" onClick={onClose} className="px-3 py-1.5 rounded hover:bg-slate-100">Cancelar</button>
+                <button type="submit" className="px-4 py-1.5 bg-indigo-600 text-white font-semibold rounded">Crear</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    function YearModalComponent({ existingYears, onClose, onSuccess }) {
+      const maxYr = existingYears.length > 0 ? Math.max(...existingYears.map(y => y.year)) : 2026;
+      const [year, setYear] = useState(maxYr + 1);
+      const [cloneFrom, setCloneFrom] = useState('');
+      const [notes, setNotes] = useState('');
+      const [error, setError] = useState('');
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        try {
+          const res = await fetch('/api/v1/years', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ year: Number(year), notes, copy_from_year: cloneFrom ? Number(cloneFrom) : null })
+          });
+          if (!res.ok) {
+            const d = await res.json();
+            throw new Error(d.detail || "Error");
+          }
+          onSuccess(Number(year));
+          onClose();
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 border border-slate-200 text-xs">
+            <h3 className="text-sm font-bold text-slate-800 mb-3">Crear Nuevo Año Fiscal</h3>
+            {error && <div className="bg-rose-50 text-rose-700 p-2 rounded mb-3">{error}</div>}
+            <form onSubmit={handleSubmit} className="space-y-3">
+              <div>
+                <label className="block font-semibold mb-1">Año</label>
+                <input required type="number" value={year} onChange={e => setYear(Number(e.target.value))} className="w-full bg-slate-50 border border-slate-300 rounded px-3 py-2 font-bold" />
+              </div>
+              <div>
+                <label className="block font-semibold mb-1">Clonar Valores de Año Previo</label>
+                <select value={cloneFrom} onChange={e => setCloneFrom(e.target.value)} aria-label="Clonar valores de año previo" className="w-full bg-slate-50 border border-slate-300 rounded px-3 py-2">
+                  <option value="">Iniciar en $0.00</option>
+                  {existingYears.map(y => <option key={y.year} value={y.year}>Copiar valores de {y.year}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block font-semibold mb-1">Notas / Premisas</label>
+                <textarea rows={2} value={notes} onChange={e => setNotes(e.target.value)} className="w-full bg-slate-50 border border-slate-300 rounded px-3 py-2" placeholder="Premisas presupuestarias..." />
+              </div>
+              <div className="pt-2 flex justify-end space-x-2">
+                <button type="button" onClick={onClose} className="px-3 py-1.5 rounded hover:bg-slate-100">Cancelar</button>
+                <button type="submit" className="px-4 py-1.5 bg-indigo-600 text-white font-semibold rounded">Crear Año</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
