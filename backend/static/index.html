@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Planificador de Presupuesto - Categorías, Cuentas y Gastos</title>
+  <title>Sistema Presupuestario Multiempresa & Consolidación Corporativa</title>
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- React 18 & Babel Standalone -->
@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
-    /* Incremento del tamaño base de fuente en 1 punto (17px = ~12.75pt vs 16px = 12pt) */
+    /* Incremento del tamaño base de fuente en 1 punto (17px) */
     html { font-size: 17px; }
     body { font-family: 'Inter', sans-serif; font-size: 0.9375rem; }
     .font-mono { font-family: 'JetBrains Mono', monospace; }
@@ -23,20 +23,25 @@
     ::-webkit-scrollbar-track { background: #f1f5f9; }
     ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
     ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fade-in { animation: fadeIn 0.25s ease-out forwards; }
   </style>
 </head>
 <body class="bg-slate-50 text-slate-900 antialiased selection:bg-indigo-500 selection:text-white">
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useEffect, useCallback } = React;
+    const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
     const MONTH_NAMES = [
       'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
       'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
     ];
 
-    // --- Funciones para Precisión Decimal en Centavos ---
+    // --- Utilidades de Precisión Decimal en Centavos ---
     function parseToCents(val) {
       if (val === undefined || val === null || val === '') return 0;
       const str = String(val).trim().replace(',', '.');
@@ -68,7 +73,14 @@
       return `$${intVal.toLocaleString('es-EC')}.${decStr}`;
     }
 
-    // --- Recálculo reactivo en frontend de los 6 totales ---
+    function formatShortMoney(cents) {
+      const dollars = cents / 100;
+      if (dollars >= 1000000) return `$${(dollars / 1000000).toFixed(1)}M`;
+      if (dollars >= 1000) return `$${(dollars / 1000).toFixed(1)}k`;
+      return `$${dollars.toFixed(0)}`;
+    }
+
+    // --- Recálculo reactivo local de los 6 totales por empresa ---
     function recalculateSummary(data) {
       const summary = JSON.parse(JSON.stringify(data));
       const genMonthly = {};
@@ -84,7 +96,6 @@
           let accAnnual = 0;
           for (let m = 1; m <= 12; m++) {
             const c = parseToCents(acc.months[m] || '0.00');
-            // Preservar lo que el usuario está escribiendo; no sobrescribir acc.months[m] aquí
             accAnnual += c;
             catMonthly[m] += c;
           }
@@ -112,46 +123,1086 @@
       return summary;
     }
 
-    function App() {
-      const [data, setData] = useState(null);
+    // =========================================================================
+    // COMPONENTE: CONSOLIDADO CORPORATIVO (Secciones 10, 11, 20, 21)
+    // =========================================================================
+    function CorporateConsolidationView({
+      companies,
+      selectedYear,
+      onSelectYear,
+      availableYears,
+      onOpenAddCompany,
+      onEditCompany
+    }) {
+      const [selectedCompanyIds, setSelectedCompanyIds] = useState([]);
+      const [consolidation, setConsolidation] = useState(null);
       const [loading, setLoading] = useState(true);
       const [error, setError] = useState(null);
 
-      // Celdas modificadas pendientes de guardar
+      // Por defecto seleccionar todas las empresas disponibles
+      useEffect(() => {
+        if (companies.length > 0 && selectedCompanyIds.length === 0) {
+          setSelectedCompanyIds(companies.map(c => c.id));
+        }
+      }, [companies]);
+
+      const toggleCompany = (id) => {
+        setSelectedCompanyIds(prev => {
+          if (prev.includes(id)) {
+            if (prev.length === 1) return prev; // Mantener al menos una
+            return prev.filter(x => x !== id);
+          } else {
+            return [...prev, id];
+          }
+        });
+      };
+
+      const selectAll = () => setSelectedCompanyIds(companies.map(c => c.id));
+      const deselectAll = () => {
+        if (companies.length > 0) setSelectedCompanyIds([companies[0].id]);
+      };
+
+      const loadConsolidation = useCallback(async () => {
+        if (selectedCompanyIds.length === 0) return;
+        setLoading(true);
+        setError(null);
+        try {
+          const idsParam = selectedCompanyIds.join(',');
+          const res = await fetch(`/api/corporate/consolidation?company_ids=${idsParam}&year=${selectedYear}`);
+          if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.detail || "Error al calcular consolidación corporativa.");
+          }
+          const json = await res.json();
+          setConsolidation(json);
+        } catch (e) {
+          setError(e.message);
+        } finally {
+          setLoading(false);
+        }
+      }, [selectedCompanyIds, selectedYear]);
+
+      useEffect(() => {
+        loadConsolidation();
+      }, [loadConsolidation]);
+
+      const totalAnnualCents = useMemo(() => {
+        return consolidation ? parseToCents(consolidation.total_annual) : 0;
+      }, [consolidation]);
+
+      const monthlyBreakdown = useMemo(() => {
+        if (!consolidation) return [];
+        return Array.from({ length: 12 }, (_, i) => {
+          const m = i + 1;
+          const cents = parseToCents(consolidation.consolidated_monthly_totals[m] || '0.00');
+          return {
+            month: m,
+            name: MONTH_NAMES[i],
+            shortName: MONTH_NAMES[i].slice(0, 3),
+            cents
+          };
+        });
+      }, [consolidation]);
+
+      const maxMonth = useMemo(() => {
+        if (monthlyBreakdown.length === 0) return null;
+        let mx = monthlyBreakdown[0];
+        monthlyBreakdown.forEach(item => {
+          if (item.cents > mx.cents) mx = item;
+        });
+        return mx;
+      }, [monthlyBreakdown]);
+
+      const maxChartCents = useMemo(() => {
+        const mx = Math.max(...monthlyBreakdown.map(x => x.cents), 0);
+        return mx > 0 ? mx : 10000;
+      }, [monthlyBreakdown]);
+
+      return (
+        <div className="space-y-6 animate-fade-in">
+          {/* CINTILLO DISTINTIVO CORPORATIVO */}
+          <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white rounded-2xl p-5 shadow-lg border border-slate-800 flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center space-x-3.5">
+              <div className="w-12 h-12 rounded-xl bg-indigo-500/20 border border-indigo-400/30 flex items-center justify-center text-2xl">
+                🌐
+              </div>
+              <div>
+                <div className="flex items-center space-x-2">
+                  <h2 className="text-lg font-black tracking-tight text-white">CONSOLIDADO CORPORATIVO — GRUPO EMPRESARIAL</h2>
+                  <span className="bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 text-[11px] font-bold px-2 py-0.5 rounded-full">
+                    Base 0 • Agregación Dinámica
+                  </span>
+                </div>
+                <p className="text-xs text-indigo-200/80 mt-0.5">
+                  Análisis consolidado en tiempo real sin duplicación física de datos en base de datos.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-3 bg-white/10 backdrop-blur-xs px-3.5 py-1.5 rounded-xl border border-white/10">
+              <span className="text-xs text-indigo-200 font-semibold">Año Presupuestario:</span>
+              <select
+                value={selectedYear}
+                onChange={(e) => onSelectYear(Number(e.target.value))}
+                className="bg-slate-900 text-white font-bold text-sm px-2.5 py-1 rounded-lg border border-indigo-400/30 focus:outline-none cursor-pointer"
+              >
+                {availableYears.map(yr => (
+                  <option key={yr} value={yr}>{yr}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* FILTRO DE EMPRESAS SELECCIONADAS (Sección 20) */}
+          <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-3 pb-3 border-b border-slate-100">
+              <div className="flex items-center space-x-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-500">Empresas Participantes en el Consolidado:</span>
+                <span className="bg-indigo-50 text-indigo-700 font-bold text-xs px-2 py-0.5 rounded-md border border-indigo-200">
+                  {selectedCompanyIds.length} de {companies.length} seleccionadas
+                </span>
+              </div>
+              <div className="flex items-center space-x-2 text-xs">
+                <button
+                  onClick={selectAll}
+                  className="text-indigo-600 hover:text-indigo-800 font-semibold px-2 py-1 rounded hover:bg-indigo-50 transition"
+                >
+                  ✓ Todas
+                </button>
+                <span className="text-slate-300">|</span>
+                <button
+                  onClick={deselectAll}
+                  className="text-slate-500 hover:text-slate-700 font-medium px-2 py-1 rounded hover:bg-slate-100 transition"
+                >
+                  Limpiar
+                </button>
+                <span className="text-slate-300">|</span>
+                <button
+                  onClick={async () => {
+                    if (!confirm("¿Deseas replicar la estructura de cuentas y categorías de EDIMCA a todas las empresas del grupo?\n\nLas cuentas faltantes se agregarán en Base 0 ($0.00) sin alterar los presupuestos existentes.")) return;
+                    try {
+                      const res = await fetch('/api/companies/replicate-base-structure', {
+                        method: 'POST',
+                        headers: { 'X-User': 'admin' }
+                      });
+                      if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.detail || 'Error al replicar');
+                      }
+                      const info = await res.json();
+                      alert(`✓ Replicación corporativa completada:\n\n${info.total_categories_created} categorías y ${info.total_accounts_created} cuentas creadas en las empresas del grupo.`);
+                      window.location.reload();
+                    } catch (e) {
+                      alert(e.message);
+                    }
+                  }}
+                  className="text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2.5 py-1 rounded-lg transition flex items-center space-x-1"
+                  title="Asegura que todas las empresas tengan el catálogo de categorías y cuentas de EDIMCA"
+                >
+                  <span>🔄</span>
+                  <span>Replicar EDIMCA a Todas</span>
+                </button>
+                <span className="text-slate-300">|</span>
+                <button
+                  onClick={onOpenAddCompany}
+                  className="text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 px-3 py-1.5 rounded-lg shadow-sm transition flex items-center space-x-1"
+                >
+                  <span>+</span>
+                  <span>Nueva Empresa</span>
+                </button>
+                <span className="text-slate-300">|</span>
+                <button
+                  onClick={() => {
+                    const ids = selectedCompanyIds.join(',');
+                    const url = `/api/export/consolidation?company_ids=${ids}&year=${selectedYear}`;
+                    window.open(url, '_blank');
+                  }}
+                  title="Exportar el consolidado corporativo actual a Excel"
+                  className="text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2.5 py-1 rounded-lg transition flex items-center space-x-1"
+                >
+                  <span>📥</span>
+                  <span>Exportar Excel</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+              {companies.map(comp => {
+                const isChecked = selectedCompanyIds.includes(comp.id);
+                return (
+                  <label
+                    key={comp.id}
+                    className={`flex items-center space-x-3 p-3 rounded-xl border cursor-pointer transition select-none ${
+                      isChecked
+                        ? 'bg-indigo-50/50 border-indigo-300 ring-1 ring-indigo-400/30'
+                        : 'bg-slate-50/50 border-slate-200 opacity-60 hover:opacity-100'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isChecked}
+                      onChange={() => toggleCompany(comp.id)}
+                      className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-xs text-slate-900 truncate">{comp.name}</span>
+                        <span className="text-[10px] font-mono text-indigo-700 font-bold bg-white px-1.5 py-0.5 rounded border border-slate-200 ml-1">
+                          {comp.code}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-500 truncate">{comp.trade_name || comp.tax_id || 'Activo'}</div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
+          {loading ? (
+            <div className="py-20 text-center bg-white rounded-2xl border border-slate-200 shadow-xs">
+              <div className="inline-block animate-spin rounded-full h-8 w-8 border-4 border-indigo-600 border-t-transparent mb-3" />
+              <p className="text-slate-500 text-sm font-medium">Calculando consolidación oficial para {selectedCompanyIds.length} empresa(s)...</p>
+            </div>
+          ) : error ? (
+            <div className="p-4 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-xl">
+              {error}
+            </div>
+          ) : consolidation ? (
+            <>
+              {/* 4 KPIs CONSOLIDADOS */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+                  <div className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Presupuesto Consolidado {selectedYear}</div>
+                  <div className="text-2xl font-black text-slate-900 font-mono tracking-tight">
+                    {formatMoney(consolidation.total_annual)}
+                  </div>
+                  <div className="text-xs text-emerald-600 font-bold mt-1 flex items-center space-x-1">
+                    <span>✓</span>
+                    <span>Cuadre verificado (100.0%)</span>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+                  <div className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Promedio Mensual Consolidado</div>
+                  <div className="text-2xl font-black text-indigo-700 font-mono tracking-tight">
+                    {formatMoney(centsToString(Math.round(totalAnnualCents / 12)))}
+                  </div>
+                  <div className="text-xs text-slate-400 font-medium mt-1">
+                    Distribución sobre 12 meses
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+                  <div className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Mes de Mayor Asignación</div>
+                  <div className="text-xl font-bold text-slate-900 tracking-tight">
+                    {maxMonth ? maxMonth.name : '—'}
+                  </div>
+                  <div className="text-xs font-mono font-bold text-indigo-600 mt-1">
+                    {maxMonth ? formatMoney(centsToString(maxMonth.cents)) : '$0.00'}
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+                  <div className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Empresas Consolidadas</div>
+                  <div className="text-2xl font-black text-slate-900 tracking-tight">
+                    {consolidation.companies_count} <span className="text-xs font-normal text-slate-400">Sociedades</span>
+                  </div>
+                  <div className="text-xs text-indigo-600 font-semibold mt-1">
+                    Modo Lectura Corporativa
+                  </div>
+                </div>
+              </div>
+
+              {/* GRÁFICO DE EVOLUCIÓN MENSUAL CONSOLIDADA */}
+              <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+                <div className="flex items-center justify-between mb-4 pb-2 border-b border-slate-100">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Evolución Mensual Consolidada (Ene - Dic)</h3>
+                    <p className="text-xs text-slate-400 font-medium">Suma horizontal de las {consolidation.companies_count} empresas para cada mes</p>
+                  </div>
+                  <span className="text-xs font-mono font-bold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-md">
+                    Total: {formatMoney(consolidation.total_annual)}
+                  </span>
+                </div>
+
+                <div className="h-56 w-full flex items-end justify-between gap-2 pt-6 pb-2 px-1">
+                  {monthlyBreakdown.map((item) => {
+                    const heightPct = maxChartCents > 0 ? (item.cents / maxChartCents) * 100 : 0;
+                    const isMax = maxMonth && item.month === maxMonth.month && item.cents > 0;
+                    return (
+                      <div key={item.month} className="flex-1 flex flex-col items-center h-full justify-end group">
+                        <div className="text-[10px] font-mono text-slate-500 opacity-0 group-hover:opacity-100 transition-opacity mb-1 whitespace-nowrap">
+                          {formatShortMoney(item.cents)}
+                        </div>
+                        <div className="w-full max-w-[42px] bg-slate-100 rounded-t-lg overflow-hidden flex items-end h-[160px]">
+                          <div
+                            style={{ height: `${Math.max(4, heightPct)}%` }}
+                            className={`w-full rounded-t-lg transition-all duration-300 ${
+                              isMax
+                                ? 'bg-gradient-to-t from-indigo-600 to-indigo-500 shadow-sm'
+                                : 'bg-gradient-to-t from-slate-400 to-slate-300 group-hover:from-indigo-400 group-hover:to-indigo-300'
+                            }`}
+                          />
+                        </div>
+                        <div className="text-xs font-bold text-slate-600 mt-2">{item.shortName}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* TABLA DE DESGLOSE Y PARTICIPACIÓN POR EMPRESA (Secciones 10 y 11) */}
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+                <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+                  <div>
+                    <h3 className="font-bold text-slate-900 text-sm">Desglose Presupuestario por Empresa</h3>
+                    <p className="text-xs text-slate-400 font-medium">Valores mensuales y porcentaje de participación respecto al total consolidado</p>
+                  </div>
+                  <span className="text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 px-3 py-1 rounded-lg">
+                    {consolidation.companies_breakdown.length} Entidades
+                  </span>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead className="bg-slate-100 text-slate-700 font-semibold border-b border-slate-200">
+                      <tr>
+                        <th className="py-3 px-3 min-w-[220px] border-r border-slate-200">Empresa</th>
+                        {MONTH_NAMES.map((name, idx) => (
+                          <th key={name} className="py-2.5 px-2 text-right min-w-[95px] border-r border-slate-200">
+                            <div>{name.slice(0, 3)}</div>
+                            <div className="text-[10px] text-slate-400 font-normal">Mes {idx + 1}</div>
+                          </th>
+                        ))}
+                        <th className="py-3 px-3 text-right min-w-[130px] bg-slate-200/80 text-slate-900 font-bold border-r border-slate-200">
+                          Total Anual
+                        </th>
+                        <th className="py-3 px-2 text-right min-w-[85px] bg-slate-200/80 text-slate-900 font-bold">
+                          % Part.
+                        </th>
+                      </tr>
+                    </thead>
+
+                    <tbody className="divide-y divide-slate-100 font-mono">
+                      {consolidation.companies_breakdown.map((row) => (
+                        <tr key={row.company_id} className="hover:bg-indigo-50/30 transition-colors">
+                          <td className="py-2.5 px-3 border-r border-slate-200 font-sans font-bold text-slate-800">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center space-x-2 truncate">
+                                <span className="inline-block bg-indigo-100 text-indigo-800 text-[10px] px-1.5 py-0.5 rounded font-bold font-mono">
+                                  {row.company_code}
+                                </span>
+                                <span className="truncate">{row.company_name}</span>
+                              </div>
+                              {onEditCompany && (
+                                <button
+                                  onClick={() => {
+                                    const compObj = companies.find(c => c.id === row.company_id);
+                                    if (compObj) onEditCompany(compObj);
+                                  }}
+                                  title={`Modificar datos de ${row.company_name}`}
+                                  className="text-slate-400 hover:text-indigo-600 p-1 rounded hover:bg-slate-200/60 transition ml-2 text-xs"
+                                >
+                                  ✏️
+                                </button>
+                              )}
+                            </div>
+                          </td>
+
+                          {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
+                            <td key={m} className="py-2.5 px-2 text-right border-r border-slate-200 text-slate-700">
+                              {formatMoney(row.monthly_totals[m] || '0.00')}
+                            </td>
+                          ))}
+
+                          <td className="py-2.5 px-3 text-right bg-slate-50 font-bold text-indigo-950 border-r border-slate-200">
+                            {formatMoney(row.annual_total)}
+                          </td>
+
+                          <td className="py-2.5 px-2 text-right bg-slate-50 font-bold text-slate-700">
+                            {row.percentage_share}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+
+                    {/* FILA DE TOTAL CONSOLIDADO */}
+                    <tfoot className="bg-slate-900 text-white font-mono sticky bottom-0 z-10 shadow-md">
+                      <tr>
+                        <td className="py-3 px-3 border-r border-slate-700 font-sans font-black text-xs uppercase tracking-wider text-amber-300">
+                          TOTAL CONSOLIDADO
+                        </td>
+                        {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
+                          <td key={m} className="py-3 px-2 text-right border-r border-slate-700 font-bold text-amber-300 text-xs">
+                            {formatMoney(consolidation.consolidated_monthly_totals[m] || '0.00')}
+                          </td>
+                        ))}
+                        <td className="py-3 px-3 text-right font-black text-emerald-400 bg-slate-950 border-r border-slate-700 text-sm">
+                          {formatMoney(consolidation.total_annual)}
+                        </td>
+                        <td className="py-3 px-2 text-right font-black text-emerald-400 bg-slate-950 text-xs">
+                          100.00%
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
+            </>
+          ) : null}
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // COMPONENTE: DASHBOARD POR EMPRESA (Sprint 2 conservado con aislamiento)
+    // =========================================================================
+    function CompanyDashboardView({
+      data,
+      selectedYear,
+      onSelectYear,
+      baseYear,
+      onSelectBaseYear,
+      availableYears,
+      comparisonData,
+      loading,
+      onRefresh,
+      onNavigateToMatrix
+    }) {
+      const [selectedCategoryFilter, setSelectedCategoryFilter] = useState('ALL');
+      const [selectedAccountFilter, setSelectedAccountFilter] = useState('ALL');
+      const [drilldownCategory, setDrilldownCategory] = useState(null);
+      const [topLimit, setTopLimit] = useState(10);
+
+      const totalAnnualCents = useMemo(() => parseToCents(data.general_annual_total || '0.00'), [data]);
+      const monthlyAvgCents = useMemo(() => Math.round(totalAnnualCents / 12), [totalAnnualCents]);
+
+      const monthlyBreakdown = useMemo(() => {
+        return Array.from({ length: 12 }, (_, i) => {
+          const m = i + 1;
+          const cents = parseToCents(data.general_monthly_totals[m] || '0.00');
+          return {
+            month: m,
+            name: MONTH_NAMES[i],
+            shortName: MONTH_NAMES[i].slice(0, 3),
+            cents
+          };
+        });
+      }, [data]);
+
+      const maxMonth = useMemo(() => {
+        let mx = monthlyBreakdown[0];
+        monthlyBreakdown.forEach(item => {
+          if (item.cents > mx.cents) mx = item;
+        });
+        return mx;
+      }, [monthlyBreakdown]);
+
+      const minMonth = useMemo(() => {
+        const positives = monthlyBreakdown.filter(x => x.cents > 0);
+        if (positives.length === 0) return monthlyBreakdown[0];
+        let mn = positives[0];
+        positives.forEach(item => {
+          if (item.cents < mn.cents) mn = item;
+        });
+        return mn;
+      }, [monthlyBreakdown]);
+
+      // Categorías ordenadas por presupuesto anual
+      const rankedCategories = useMemo(() => {
+        return [...data.categories].sort((a, b) => {
+          return parseToCents(b.annual_total) - parseToCents(a.annual_total);
+        });
+      }, [data.categories]);
+
+      // Top cuentas global de la empresa
+      const topAccounts = useMemo(() => {
+        const accs = [];
+        data.categories.forEach(cat => {
+          cat.accounts.forEach(acc => {
+            accs.push({
+              ...acc,
+              categoryName: cat.name,
+              cents: parseToCents(acc.annual_total)
+            });
+          });
+        });
+        accs.sort((a, b) => b.cents - a.cents);
+        return topLimit === 'ALL' ? accs : accs.slice(0, topLimit);
+      }, [data.categories, topLimit]);
+
+      return (
+        <div className="space-y-6 animate-fade-in">
+          {/* BARRA DE FILTROS SUPERIOR */}
+          <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-4">
+            <div className="flex flex-wrap items-center gap-3">
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">Año Proyectado</label>
+                <select
+                  value={selectedYear}
+                  onChange={(e) => onSelectYear(Number(e.target.value))}
+                  className="bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-xs font-bold text-indigo-700 focus:outline-none"
+                >
+                  {availableYears.map(yr => (
+                    <option key={yr} value={yr}>{yr}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">Año Base (Comparativo)</label>
+                <select
+                  value={baseYear}
+                  onChange={(e) => onSelectBaseYear(Number(e.target.value))}
+                  className="bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-700 focus:outline-none"
+                >
+                  {availableYears.map(yr => (
+                    <option key={yr} value={yr}>{yr}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">Categoría</label>
+                <select
+                  value={selectedCategoryFilter}
+                  onChange={(e) => {
+                    setSelectedCategoryFilter(e.target.value);
+                    setSelectedAccountFilter('ALL');
+                  }}
+                  className="bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-700 focus:outline-none min-w-[180px]"
+                >
+                  <option value="ALL">Todas las Categorías</option>
+                  {data.categories.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => {
+                  setSelectedCategoryFilter('ALL');
+                  setSelectedAccountFilter('ALL');
+                  setDrilldownCategory(null);
+                }}
+                className="text-xs text-slate-500 hover:text-indigo-600 font-semibold px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 transition"
+              >
+                Limpiar Filtros
+              </button>
+            </div>
+          </div>
+
+          {/* 4 KPIS PRINCIPALES */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+              <div className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Total Presupuesto Anual</div>
+              <div className="text-2xl font-black text-slate-900 font-mono tracking-tight">
+                {formatMoney(data.general_annual_total)}
+              </div>
+              <div className="text-xs text-slate-500 font-medium mt-1">
+                Empresa: <strong className="text-indigo-700">{data.company_name}</strong>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+              <div className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Promedio Mensual</div>
+              <div className="text-2xl font-black text-indigo-700 font-mono tracking-tight">
+                {formatMoney(centsToString(monthlyAvgCents))}
+              </div>
+              <div className="text-xs text-slate-400 font-medium mt-1">
+                Base anual / 12 meses
+              </div>
+            </div>
+
+            <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+              <div className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Mes de Mayor Presupuesto</div>
+              <div className="text-xl font-bold text-slate-900 tracking-tight">
+                {maxMonth ? maxMonth.name : '—'}
+              </div>
+              <div className="text-xs font-mono font-bold text-emerald-600 mt-1">
+                {maxMonth ? formatMoney(centsToString(maxMonth.cents)) : '$0.00'}
+              </div>
+            </div>
+
+            <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+              <div className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Mes de Menor Presupuesto</div>
+              <div className="text-xl font-bold text-slate-900 tracking-tight">
+                {minMonth ? minMonth.name : '—'}
+              </div>
+              <div className="text-xs font-mono font-bold text-amber-600 mt-1">
+                {minMonth ? formatMoney(centsToString(minMonth.cents)) : '$0.00'}
+              </div>
+            </div>
+          </div>
+
+          {/* EVOLUCIÓN MENSUAL Y DISTRIBUCIÓN POR CATEGORÍA */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Gráfico Evolución Mensual */}
+            <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+              <h3 className="text-sm font-bold text-slate-900 mb-1">Presupuesto mensual ({selectedYear})</h3>
+              <p className="text-xs text-slate-400 mb-4">Evolución cronológica de asignaciones presupuestarias</p>
+              
+              <div className="h-48 w-full flex items-end justify-between gap-1.5 pt-4 pb-2">
+                {monthlyBreakdown.map((item) => {
+                  const maxC = Math.max(...monthlyBreakdown.map(x => x.cents), 1000);
+                  const hPct = (item.cents / maxC) * 100;
+                  return (
+                    <div key={item.month} className="flex-1 flex flex-col items-center h-full justify-end group">
+                      <div className="w-full bg-slate-100 rounded-t overflow-hidden flex items-end h-[140px]">
+                        <div
+                          style={{ height: `${Math.max(4, hPct)}%` }}
+                          className="w-full bg-indigo-600 group-hover:bg-indigo-500 rounded-t transition-all"
+                        />
+                      </div>
+                      <div className="text-[11px] font-bold text-slate-600 mt-1.5">{item.shortName}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Ranking de Categorías */}
+            <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+              <h3 className="text-sm font-bold text-slate-900 mb-1">Distribución por Categoría</h3>
+              <p className="text-xs text-slate-400 mb-4">Participación y jerarquía de centros de costo</p>
+              
+              <div className="space-y-3 max-h-52 overflow-y-auto pr-1">
+                {rankedCategories.map((cat, idx) => {
+                  const cCents = parseToCents(cat.annual_total);
+                  const pct = totalAnnualCents > 0 ? ((cCents / totalAnnualCents) * 100).toFixed(1) : '0.0';
+                  return (
+                    <div
+                      key={cat.id}
+                      onClick={() => setDrilldownCategory(cat)}
+                      className="p-2.5 rounded-xl border border-slate-100 hover:border-indigo-200 hover:bg-indigo-50/30 cursor-pointer transition flex items-center justify-between"
+                    >
+                      <div className="min-w-0 flex-1 pr-3">
+                        <div className="flex items-center space-x-2">
+                          <span className="text-xs font-bold text-slate-400">#{idx + 1}</span>
+                          <span className="text-xs font-bold text-slate-800 truncate">{cat.name}</span>
+                        </div>
+                        <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden mt-1.5">
+                          <div style={{ width: `${pct}%` }} className="bg-indigo-600 h-full rounded-full" />
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-xs font-mono font-bold text-slate-900">{formatMoney(cat.annual_total)}</div>
+                        <div className="text-[11px] font-semibold text-indigo-600">{pct}%</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* DRILL-DOWN O TABLA RESUMEN POR CATEGORÍA */}
+          {drilldownCategory ? (
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+              <div className="p-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={() => setDrilldownCategory(null)}
+                    className="text-xs text-indigo-700 hover:text-indigo-900 bg-white border border-slate-300 px-3 py-1.5 rounded-lg font-bold shadow-xs transition"
+                  >
+                    ← Volver a vista general
+                  </button>
+                  <span className="text-slate-300">/</span>
+                  <span className="font-bold text-slate-900 text-sm">📁 {drilldownCategory.name}</span>
+                </div>
+                <div className="text-xs font-mono font-bold text-indigo-700">
+                  Total: {formatMoney(drilldownCategory.annual_total)}
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead className="bg-slate-100 text-slate-700 font-semibold border-b border-slate-200">
+                    <tr>
+                      <th className="py-2.5 px-3 min-w-[150px] border-r border-slate-200">Proveedor</th>
+                      <th className="py-2.5 px-3 min-w-[200px] border-r border-slate-200">Cuenta</th>
+                      {MONTH_NAMES.map(m => (
+                        <th key={m} className="py-2 px-2 text-right min-w-[85px] border-r border-slate-200">{m.slice(0, 3)}</th>
+                      ))}
+                      <th className="py-2.5 px-3 text-right min-w-[110px] bg-slate-200 font-bold">Total Anual</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-mono">
+                    {drilldownCategory.accounts.map(acc => (
+                      <tr key={acc.id} className="hover:bg-indigo-50/20">
+                        <td className="py-2 px-3 border-r border-slate-200 font-sans text-slate-700">
+                          {acc.provider ? (
+                            <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-xs border border-slate-200 font-medium">
+                              {acc.provider}
+                            </span>
+                          ) : (
+                            <span className="text-slate-300 italic">—</span>
+                          )}
+                        </td>
+                        <td className="py-2 px-3 border-r border-slate-200 font-sans font-medium text-slate-800">
+                          • {acc.name}
+                        </td>
+                        {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
+                          <td key={m} className="py-2 px-2 text-right border-r border-slate-200 text-slate-700">
+                            {formatMoney(acc.months[m] || '0.00')}
+                          </td>
+                        ))}
+                        <td className="py-2 px-3 text-right bg-slate-50 font-bold text-indigo-900">
+                          {formatMoney(acc.annual_total)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+              <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+                <div>
+                  <h3 className="font-bold text-slate-900 text-sm">Resumen Presupuestario por Categoría</h3>
+                  <p className="text-xs text-slate-400 font-medium">Consolidado mensual de la empresa seleccionada</p>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={() => {
+                      const url = `/api/export/budget?company_id=${data.company_id}&year=${data.year}`;
+                      window.open(url, '_blank');
+                    }}
+                    title="Exportar resumen presupuestario a Excel"
+                    className="text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5"
+                  >
+                    <span>📥</span>
+                    <span>Exportar Excel</span>
+                  </button>
+                  <span className="text-xs font-semibold text-slate-500 bg-slate-100 px-2.5 py-1 rounded-md">
+                    {data.categories.length} Categorías
+                  </span>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead className="bg-slate-100 text-slate-700 font-semibold border-b border-slate-200">
+                    <tr>
+                      <th className="py-3 px-3 min-w-[220px] border-r border-slate-200">Categoría</th>
+                      {MONTH_NAMES.map(m => (
+                        <th key={m} className="py-2.5 px-2 text-right min-w-[95px] border-r border-slate-200">
+                          <div>{m.slice(0, 3)}</div>
+                        </th>
+                      ))}
+                      <th className="py-3 px-3 text-right min-w-[125px] bg-slate-200/80 font-bold border-r border-slate-200">
+                        Total Anual
+                      </th>
+                      <th className="py-3 px-2 text-center min-w-[80px]">Acción</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-mono">
+                    {data.categories.map(cat => (
+                      <tr key={cat.id} className="hover:bg-indigo-50/20">
+                        <td className="py-2.5 px-3 border-r border-slate-200 font-sans font-bold text-slate-800">
+                          📁 {cat.name}
+                        </td>
+                        {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
+                          <td key={m} className="py-2.5 px-2 text-right border-r border-slate-200 text-slate-700">
+                            {formatMoney(cat.monthly_totals[m] || '0.00')}
+                          </td>
+                        ))}
+                        <td className="py-2.5 px-3 text-right bg-slate-50 font-bold text-indigo-900 border-r border-slate-200">
+                          {formatMoney(cat.annual_total)}
+                        </td>
+                        <td className="py-2.5 px-2 text-center font-sans">
+                          <button
+                            onClick={() => setDrilldownCategory(cat)}
+                            className="text-xs text-indigo-600 hover:text-indigo-800 font-bold px-2 py-1 rounded bg-indigo-50 border border-indigo-200"
+                          >
+                            Cuentas ↳
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className="bg-slate-900 text-white font-mono sticky bottom-0 z-10 shadow-md">
+                    <tr>
+                      <td className="py-3 px-3 border-r border-slate-700 font-sans font-bold text-xs uppercase tracking-wider text-slate-200">
+                        TOTAL GENERAL
+                      </td>
+                      {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
+                        <td key={m} className="py-3 px-2 text-right border-r border-slate-700 font-bold text-amber-300 text-xs">
+                          {formatMoney(data.general_monthly_totals[m] || '0.00')}
+                        </td>
+                      ))}
+                      <td className="py-3 px-3 text-right font-black text-emerald-400 bg-slate-950 border-r border-slate-700 text-sm">
+                        {formatMoney(data.general_annual_total)}
+                      </td>
+                      <td className="py-3 px-2 text-center text-slate-400 font-sans text-[11px]">
+                        ✓ Cuadre
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* TOP DE CUENTAS */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+            <div className="p-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="font-bold text-slate-900 text-sm">Principales cuentas por presupuesto anual</h3>
+                <p className="text-xs text-slate-400 font-medium">Clasificación de cuentas por magnitud presupuestaria</p>
+              </div>
+              <div className="flex items-center space-x-2 text-xs">
+                <span className="text-slate-400 font-medium">Mostrar:</span>
+                {[5, 10, 20, 'ALL'].map(limit => (
+                  <button
+                    key={limit}
+                    onClick={() => setTopLimit(limit)}
+                    className={`px-2.5 py-1 rounded-md font-semibold transition ${
+                      topLimit === limit
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    {limit === 'ALL' ? 'Todas' : `Top ${limit}`}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead className="bg-slate-100 text-slate-700 font-semibold border-b border-slate-200">
+                  <tr>
+                    <th className="py-2.5 px-3 w-14 text-center border-r border-slate-200">#</th>
+                    <th className="py-2.5 px-3 min-w-[150px] border-r border-slate-200">Categoría</th>
+                    <th className="py-2.5 px-3 min-w-[200px] border-r border-slate-200">Cuenta</th>
+                    <th className="py-2.5 px-3 min-w-[160px] border-r border-slate-200">Proveedor</th>
+                    <th className="py-2.5 px-3 text-right min-w-[120px] font-bold border-r border-slate-200">Total Anual</th>
+                    <th className="py-2.5 px-2 text-right min-w-[80px] font-bold">% Total</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-mono">
+                  {topAccounts.map((acc, idx) => {
+                    const pct = totalAnnualCents > 0 ? ((acc.cents / totalAnnualCents) * 100).toFixed(1) : '0.0';
+                    return (
+                      <tr key={acc.id} className="hover:bg-indigo-50/20">
+                        <td className="py-2 px-3 text-center border-r border-slate-200 font-sans font-bold text-slate-400">
+                          {idx + 1}
+                        </td>
+                        <td className="py-2 px-3 border-r border-slate-200 font-sans text-slate-600">
+                          {acc.categoryName}
+                        </td>
+                        <td className="py-2 px-3 border-r border-slate-200 font-sans font-bold text-slate-800">
+                          {acc.name}
+                        </td>
+                        <td className="py-2 px-3 border-r border-slate-200 font-sans text-slate-700">
+                          {acc.provider ? (
+                            <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-xs border border-slate-200">
+                              {acc.provider}
+                            </span>
+                          ) : (
+                            <span className="text-slate-300 italic">—</span>
+                          )}
+                        </td>
+                        <td className="py-2 px-3 text-right font-bold text-indigo-950 border-r border-slate-200">
+                          {formatMoney(acc.annual_total)}
+                        </td>
+                        <td className="py-2 px-2 text-right font-bold text-slate-700">
+                          {pct}%
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="p-3 bg-slate-50 border-t border-slate-100 text-[11px] text-slate-500 italic">
+              * Esta vista clasifica las cuentas según su impacto presupuestario anual total de forma estrictamente matemática, sin constituir una evaluación de desempeño.
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================================
+    // COMPONENTE PRINCIPAL (APP)
+    // =========================================================================
+    function App() {
+      // Estado de empresas y contexto
+      const [companies, setCompanies] = useState([]);
+      const [selectedCompanyId, setSelectedCompanyId] = useState(1);
+      const [appMode, setAppMode] = useState('company'); // 'company' | 'corporate'
+      
+      // Estado de presupuesto por empresa
+      const [activeTab, setActiveTab] = useState('matrix'); // 'matrix' | 'dashboard'
+      const [availableYears, setAvailableYears] = useState([2025, 2026, 2027]);
+      const [selectedYear, setSelectedYear] = useState(2026);
+      const [baseYear, setBaseYear] = useState(2025);
+      const [data, setData] = useState(null);
+      const [comparisonData, setComparisonData] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+
+      // Cambios pendientes en matriz
       const [pendingChanges, setPendingChanges] = useState(new Map());
-      const pendingChangesRef = React.useRef(pendingChanges);
-      pendingChangesRef.current = pendingChanges;
-
-      const dataRef = React.useRef(data);
-      dataRef.current = data;
-
+      const pendingChangesRef = useRef(pendingChanges);
+      const dataRef = useRef(data);
       const [isSaving, setIsSaving] = useState(false);
       const [toast, setToast] = useState(null);
 
-      // Modales
+      // Modales y formularios
       const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
       const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
       const [targetCategoryId, setTargetCategoryId] = useState(null);
       const [editingAccount, setEditingAccount] = useState(null);
       const [editingCategory, setEditingCategory] = useState(null);
 
+      // Estados controlados para formulario de nueva cuenta (Solución definitiva para Proveedor)
+      const [newAccountName, setNewAccountName] = useState('');
+      const [newAccountProvider, setNewAccountProvider] = useState('');
+      const [newAccountCode, setNewAccountCode] = useState('');
+
+      // Estados y manejador para modal de Nueva Empresa
+      const [isCompanyModalOpen, setIsCompanyModalOpen] = useState(false);
+      const [companyCode, setCompanyCode] = useState('');
+      const [companyName, setCompanyName] = useState('');
+      const [companyTradeName, setCompanyTradeName] = useState('');
+      const [companyTaxId, setCompanyTaxId] = useState('');
+
+      // Estado para modal de Copiar Año
+      const [isCopyYearModalOpen, setIsCopyYearModalOpen] = useState(false);
+
+      const openAddCompanyModal = () => {
+        setCompanyCode('');
+        setCompanyName('');
+        setCompanyTradeName('');
+        setCompanyTaxId('');
+        setIsCompanyModalOpen(true);
+      };
+
+      const handleCreateCompany = async (e) => {
+        e.preventDefault();
+        const code = companyCode.trim().toUpperCase();
+        const name = companyName.trim();
+        const trade_name = companyTradeName.trim();
+        const tax_id = companyTaxId.trim() || null;
+        if (!code || !name) return;
+
+        try {
+          const res = await fetch('/api/companies', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code, name, trade_name, tax_id, status: 'ACTIVO' })
+          });
+          if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.detail || "Error al registrar la empresa");
+          }
+          const createdComp = await res.json();
+          setIsCompanyModalOpen(false);
+          showToast(`¡Empresa "${createdComp.name}" (${createdComp.code}) creada con éxito!`);
+          
+          // Recargar catálogo y cambiar contexto automáticamente a la nueva empresa
+          const resList = await fetch('/api/companies');
+          if (resList.ok) {
+            const list = await resList.json();
+            setCompanies(list);
+          }
+          setSelectedCompanyId(createdComp.id);
+          setAppMode('company');
+          setActiveTab('matrix');
+          loadSummary(createdComp.id, selectedYear);
+          loadDashboardData(createdComp.id, selectedYear, baseYear);
+        } catch (err) {
+          alert(err.message);
+        }
+      };
+
+      // Estado y manejador para modal de Editar Empresa
+      const [editingCompany, setEditingCompany] = useState(null);
+
+      const handleUpdateCompany = async (e) => {
+        e.preventDefault();
+        if (!editingCompany) return;
+        const form = e.currentTarget;
+        const code = form.elements['compCode'].value.trim().toUpperCase();
+        const name = form.elements['compName'].value.trim();
+        const trade_name = form.elements['compTradeName'].value.trim();
+        const tax_id = form.elements['compTaxId'].value.trim() || null;
+        const status = form.elements['compStatus'].value;
+
+        if (!code || !name) return;
+
+        try {
+          const res = await fetch(`/api/companies/${editingCompany.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code, name, trade_name, tax_id, status })
+          });
+          if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.detail || "Error al actualizar la empresa");
+          }
+          const updatedComp = await res.json();
+          setEditingCompany(null);
+          showToast(`¡Empresa "${updatedComp.name}" (${updatedComp.code}) actualizada con éxito!`);
+
+          // Recargar catálogo
+          const resList = await fetch('/api/companies');
+          if (resList.ok) {
+            const list = await resList.json();
+            setCompanies(list);
+          }
+          loadSummary(editingCompany.id, selectedYear);
+          loadDashboardData(editingCompany.id, selectedYear, baseYear);
+        } catch (err) {
+          alert(err.message);
+        }
+      };
+
       const showToast = (msg) => {
         setToast(msg);
         setTimeout(() => setToast(null), 3500);
       };
 
-      const loadSummary = useCallback(async () => {
+      // Cargar catálogo de empresas
+      const loadCompanies = async () => {
         try {
-          const res = await fetch('/api/budget-summary');
+          const res = await fetch('/api/companies');
+          if (res.ok) {
+            const list = await res.json();
+            setCompanies(list);
+            if (list.length > 0 && !list.some(c => c.id === selectedCompanyId)) {
+              setSelectedCompanyId(list[0].id);
+            }
+          }
+        } catch (e) {
+          console.error("Error al cargar empresas:", e);
+        }
+      };
+
+      useEffect(() => {
+        loadCompanies();
+      }, []);
+
+      // Cargar presupuesto de la empresa seleccionada
+      const loadSummary = useCallback(async (compId = selectedCompanyId, yr = selectedYear) => {
+        setLoading(true);
+        setError(null);
+        try {
+          const res = await fetch(`/api/budget-summary?company_id=${compId}&year=${yr}`);
           if (!res.ok) {
-            let detail = '';
+            let detail = "Error al cargar el presupuesto";
             try {
               const errData = await res.json();
-              detail = errData.detail || JSON.stringify(errData);
-            } catch (_) {
-              detail = await res.text().catch(() => '');
-            }
-            throw new Error(detail || `Error ${res.status}: No se pudo obtener la estructura del presupuesto`);
+              detail = errData.detail || detail;
+            } catch (_) {}
+            throw new Error(detail);
           }
           const json = await res.json();
           setData(json);
@@ -164,21 +1215,71 @@
         } finally {
           setLoading(false);
         }
-      }, []);
+      }, [selectedCompanyId, selectedYear]);
+
+      const loadDashboardData = useCallback(async (compId = selectedCompanyId, yr = selectedYear, bYr = baseYear) => {
+        try {
+          const res = await fetch(`/api/dashboard?company_id=${compId}&year=${yr}&base_year=${bYr}`);
+          if (res.ok) {
+            const json = await res.json();
+            if (json.available_years) setAvailableYears(json.available_years);
+            if (json.comparison) setComparisonData(json.comparison);
+            if (pendingChangesRef.current.size === 0 && json.budget_summary) {
+              setData(json.budget_summary);
+              dataRef.current = json.budget_summary;
+            }
+          }
+        } catch (e) {
+          console.error("Error dashboard:", e);
+        }
+      }, [selectedCompanyId, selectedYear, baseYear]);
 
       useEffect(() => {
-        loadSummary();
-      }, [loadSummary]);
+        if (appMode === 'company') {
+          loadSummary(selectedCompanyId, selectedYear);
+          loadDashboardData(selectedCompanyId, selectedYear, baseYear);
+        }
+      }, [loadSummary, loadDashboardData, selectedCompanyId, selectedYear, baseYear, appMode]);
 
-      // Modificación en vivo de una celda mensual individual (usada al tipear en cualquier mes o al editar Feb-Dic)
+      // Proveedores únicos existentes para autocompletar
+      const existingProviders = useMemo(() => {
+        if (!data || !data.categories) return [];
+        const set = new Set();
+        data.categories.forEach(c => {
+          c.accounts.forEach(a => {
+            if (a.provider && a.provider.trim()) set.add(a.provider.trim());
+          });
+        });
+        return Array.from(set).sort();
+      }, [data]);
+
+      // Manejo de cambio de empresa con validación de cambios pendientes
+      const handleCompanyChange = (newCompId) => {
+        if (pendingChangesRef.current.size > 0) {
+          if (!confirm(`Tienes cambios sin guardar en la empresa actual. ¿Deseas descartarlos y cambiar de empresa?`)) {
+            return;
+          }
+        }
+        setSelectedCompanyId(newCompId);
+      };
+
+      const handleYearChange = (newYear) => {
+        if (pendingChangesRef.current.size > 0) {
+          if (!confirm(`Tienes cambios sin guardar en el año ${selectedYear}. ¿Deseas descartarlos y cambiar al año ${newYear}?`)) {
+            return;
+          }
+        }
+        setSelectedYear(newYear);
+        const prevYear = newYear - 1;
+        setBaseYear(prevYear);
+      };
+
+      // Edición reactiva en grilla de presupuesto
       const handleCellChange = (accountId, month, rawVal) => {
         const currentData = dataRef.current;
         if (!currentData) return;
 
-        // Normalizar coma a punto decimal (ej: "12,5" -> "12.5")
         const val = String(rawVal).replace(',', '.');
-
-        // Permitir campo vacío o número positivo con hasta 2 decimales (ej: "", "5", "5.", "5.2", "5.25", ".5")
         if (val !== '' && !/^[0-9]*\.?[0-9]{0,2}$/.test(val)) return;
 
         const updated = JSON.parse(JSON.stringify(currentData));
@@ -201,8 +1302,8 @@
         setPendingChanges(next);
       };
 
-      // Replicar valor de Enero a todos los meses (1 al 12) de la cuenta
-      const replicateJanuaryToAllMonths = (accountId, formattedVal) => {
+      // Replicar Enero a Feb - Dic
+      const replicateJanuary = (accountId, formattedVal) => {
         const currentData = dataRef.current;
         if (!currentData) return;
 
@@ -231,22 +1332,20 @@
         pendingChangesRef.current = next;
         setPendingChanges(next);
 
-        showToast(`Enero ($${formatMoney(formattedVal)}) replicado a Feb - Dic en "${accountName}". Puedes ajustar los otros meses.`);
+        showToast(`Enero ($${formatMoney(formattedVal)}) replicado a Feb - Dic en "${accountName}".`);
       };
 
-      // Al salir de la celda (blur) o presionar Enter:
-      // Si es Enero (month === 1), replica a todos los meses 1..12
-      // Si es de Febrero a Diciembre (month > 1), modifica solo ese mes individual
       const handleBlur = (accountId, month, val) => {
         const cents = parseToCents(val);
         const formatted = centsToString(cents);
         if (month === 1) {
-          replicateJanuaryToAllMonths(accountId, formatted);
+          replicateJanuary(accountId, formatted);
         } else {
           handleCellChange(accountId, month, formatted);
         }
       };
 
+      // Guardar gastos en backend con auditoría
       const handleSaveExpenses = async () => {
         const currentPending = pendingChangesRef.current;
         if (currentPending.size === 0 || !dataRef.current) return;
@@ -254,6 +1353,7 @@
         try {
           const updates = Array.from(currentPending.values()).map(u => ({
             account_id: u.account_id,
+            year: selectedYear,
             month: u.month,
             amount: centsToString(parseToCents(u.amount))
           }));
@@ -261,7 +1361,7 @@
           const res = await fetch('/api/expenses', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ updates })
+            body: JSON.stringify({ updates, username: 'admin' })
           });
 
           if (!res.ok) {
@@ -275,7 +1375,8 @@
           const cleanMap = new Map();
           setPendingChanges(cleanMap);
           pendingChangesRef.current = cleanMap;
-          showToast(`¡Se registraron ${updates.length} gasto(s) mensual(es) correctamente!`);
+          showToast(`¡Se guardaron ${updates.length} gasto(s) para el año ${selectedYear} con auditoría!`);
+          loadDashboardData(selectedCompanyId, selectedYear, baseYear);
         } catch (e) {
           alert("Error: " + e.message);
         } finally {
@@ -285,40 +1386,52 @@
 
       const handleDiscard = () => {
         if (confirm("¿Descartar cambios no guardados?")) {
-          loadSummary();
+          loadSummary(selectedCompanyId, selectedYear);
         }
       };
 
+      // Apertura modal de nueva cuenta limpiando campos
+      const openAddAccountModal = (catId) => {
+        setTargetCategoryId(catId);
+        setNewAccountName('');
+        setNewAccountProvider('');
+        setNewAccountCode('');
+        setIsAccountModalOpen(true);
+      };
+
+      // Eliminar categoría
       const handleDeleteCategory = async (catId, catName) => {
         if (!confirm(`¿Eliminar la categoría "${catName}" y todas sus cuentas asociadas?`)) return;
         try {
           const res = await fetch(`/api/categories/${catId}`, { method: 'DELETE' });
           if (res.ok) {
             showToast(`Categoría "${catName}" eliminada`);
-            loadSummary();
+            loadSummary(selectedCompanyId, selectedYear);
           }
         } catch (e) {
           alert(e.message);
         }
       };
 
+      // Eliminar cuenta
       const handleDeleteAccount = async (accId, accName) => {
         if (!confirm(`¿Eliminar la cuenta "${accName}"?`)) return;
         try {
           const res = await fetch(`/api/accounts/${accId}`, { method: 'DELETE' });
           if (res.ok) {
             showToast(`Cuenta "${accName}" eliminada`);
-            loadSummary();
+            loadSummary(selectedCompanyId, selectedYear);
           }
         } catch (e) {
           alert(e.message);
         }
       };
 
+      const activeCompany = companies.find(c => c.id === selectedCompanyId) || { name: 'Empresa Principal', code: 'EDIMCA' };
+
       return (
         <div className="min-h-screen flex flex-col bg-slate-50 text-sm">
-          
-          {/* Toast */}
+          {/* TOAST FLOTANTE */}
           {toast && (
             <div className="fixed top-20 right-6 z-50 bg-emerald-700 text-white text-sm font-semibold px-4 py-3 rounded-xl shadow-xl flex items-center space-x-2 animate-fade-in">
               <span>✓</span>
@@ -326,110 +1439,280 @@
             </div>
           )}
 
-          {/* Barra Superior */}
-          <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
-            <div className="max-w-[1920px] mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+          {/* CABECERA PRINCIPAL CON SELECTOR DE EMPRESA Y MODO */}
+          <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
+            <div className="max-w-[1920px] w-full mx-auto px-4 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-3">
               
+              {/* TÍTULO Y LOGO */}
               <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 rounded-lg bg-indigo-600 flex items-center justify-center text-white font-bold text-lg shadow-md shadow-indigo-100">
-                  📋
+                <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-black text-xl shadow-sm">
+                  P
                 </div>
                 <div>
-                  <h1 className="text-base font-bold text-slate-900 leading-tight">Planificador de Presupuesto</h1>
-                  <p className="text-xs text-slate-500 font-medium">Proveedor • Categorías • Cuentas • Gastos Mensuales</p>
+                  <h1 className="text-base font-bold text-slate-900 leading-tight">Presupuesto Corporativo Base 0</h1>
+                  <p className="text-xs text-slate-500 font-medium">Multiempresa • Consolidación Ejecutiva • Auditoría</p>
                 </div>
               </div>
 
-              {/* Botón para crear Categoría */}
-              <div className="flex items-center space-x-2">
+              {/* SELECTOR DE MODO: POR EMPRESA vs CONSOLIDADO CORPORATIVO (Sección 20) */}
+              <div className="flex items-center space-x-1.5 bg-slate-100 p-1 rounded-xl border border-slate-200">
                 <button
-                  onClick={() => setIsCategoryModalOpen(true)}
-                  className="text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 px-4 py-2 rounded-lg shadow-sm transition flex items-center space-x-1.5"
+                  onClick={() => setAppMode('company')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center space-x-1.5 ${
+                    appMode === 'company'
+                      ? 'bg-white text-indigo-700 shadow-xs'
+                      : 'text-slate-600 hover:text-indigo-600'
+                  }`}
                 >
-                  <span>+</span>
-                  <span>Nueva Categoría</span>
+                  <span>🏢</span>
+                  <span>Por Empresa</span>
+                </button>
+
+                <button
+                  onClick={() => setAppMode('corporate')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center space-x-1.5 ${
+                    appMode === 'corporate'
+                      ? 'bg-gradient-to-r from-indigo-900 to-slate-900 text-amber-300 shadow-xs'
+                      : 'text-slate-600 hover:text-indigo-600'
+                  }`}
+                >
+                  <span>🌐</span>
+                  <span>Consolidado Corporativo</span>
                 </button>
               </div>
 
-            </div>
-          </header>
+              {/* CONTEXTO DE EMPRESA Y AÑO (Sección 7) */}
+              <div className="flex items-center space-x-2.5">
+                {appMode === 'company' && (
+                  <div className="flex items-center space-x-1.5">
+                    <div className="flex items-center space-x-1.5 bg-slate-50 border border-slate-200 px-3 py-1 rounded-lg">
+                      <span className="text-xs font-bold text-slate-500 uppercase">Empresa:</span>
+                      <select
+                        value={selectedCompanyId}
+                        onChange={(e) => handleCompanyChange(Number(e.target.value))}
+                        className="bg-transparent text-xs font-bold text-indigo-700 focus:outline-none cursor-pointer max-w-[170px]"
+                      >
+                        {companies.map(c => (
+                          <option key={c.id} value={c.id}>{c.code} — {c.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <button
+                      onClick={() => setEditingCompany(activeCompany)}
+                      title={`Editar datos de ${activeCompany.name}`}
+                      className="text-xs font-semibold text-slate-600 hover:text-indigo-600 bg-white hover:bg-slate-100 border border-slate-200 px-2.5 py-1.5 rounded-lg transition flex items-center space-x-1 shadow-2xs"
+                    >
+                      <span>✏️</span>
+                      <span>Editar</span>
+                    </button>
+                    <button
+                      onClick={openAddCompanyModal}
+                      title="Registrar una nueva empresa en el grupo corporativo"
+                      className="text-xs font-bold text-indigo-700 hover:text-indigo-900 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2.5 py-1.5 rounded-lg transition flex items-center space-x-1 shadow-2xs"
+                    >
+                      <span>+</span>
+                      <span>Empresa</span>
+                    </button>
+                  </div>
+                )}
 
-          {/* Área Principal */}
-          <main className="flex-1 max-w-[1920px] w-full mx-auto px-4 sm:px-6 py-5">
-            
-            {loading && (
-              <div className="py-24 text-center">
-                <div className="inline-block animate-spin rounded-full h-8 w-8 border-4 border-indigo-600 border-t-transparent" />
-                <p className="mt-3 text-slate-500 text-sm font-medium">Cargando presupuesto...</p>
+                <div className="flex items-center space-x-1.5 bg-slate-50 border border-slate-200 px-3 py-1 rounded-lg">
+                  <span className="text-xs font-bold text-slate-500 uppercase">Año:</span>
+                  <select
+                    value={selectedYear}
+                    onChange={(e) => handleYearChange(Number(e.target.value))}
+                    className="bg-transparent text-xs font-bold text-indigo-700 focus:outline-none cursor-pointer"
+                  >
+                    {availableYears.map(yr => (
+                      <option key={yr} value={yr}>{yr}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {appMode === 'company' && activeTab === 'matrix' && (
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={() => {
+                        const url = `/api/export/budget?company_id=${selectedCompanyId}&year=${selectedYear}`;
+                        window.open(url, '_blank');
+                      }}
+                      title="Exportar el presupuesto de esta empresa a Excel"
+                      className="text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-3 py-1.5 rounded-lg shadow-sm transition flex items-center space-x-1"
+                    >
+                      <span>📥</span>
+                      <span>Exportar Excel</span>
+                    </button>
+                    <button
+                      onClick={() => setIsCopyYearModalOpen(true)}
+                      title="Copiar el presupuesto de un año a otro"
+                      className="text-xs font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-3 py-1.5 rounded-lg shadow-sm transition flex items-center space-x-1"
+                    >
+                      <span>📋</span>
+                      <span>Copiar Año</span>
+                    </button>
+                    <button
+                      onClick={() => setIsCategoryModalOpen(true)}
+                      className="text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 px-3 py-1.5 rounded-lg shadow-sm transition flex items-center space-x-1"
+                    >
+                      <span>+</span>
+                      <span>Nueva Categoría</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+            </div>
+
+            {/* SUB-BARRA DE PESTAÑAS (CUANDO ESTÁ EN MODO POR EMPRESA) */}
+            {appMode === 'company' && (
+              <div className="bg-slate-50/80 px-4 sm:px-6 py-1.5 border-t border-slate-200/80 flex items-center justify-between">
+                <div className="flex items-center space-x-2">
+                  <span className="text-xs font-medium text-slate-400">Contexto activo:</span>
+                  <span className="text-xs font-bold text-indigo-900 bg-white px-2 py-0.5 rounded border border-slate-200">
+                    🏢 {activeCompany.name} ({activeCompany.code})
+                  </span>
+                  <button
+                    onClick={() => setEditingCompany(activeCompany)}
+                    title="Editar los datos de esta empresa"
+                    className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 hover:underline flex items-center space-x-1 ml-1"
+                  >
+                    <span>✏️</span>
+                    <span>Modificar</span>
+                  </button>
+                </div>
+
+                <div className="flex items-center space-x-1">
+                  <button
+                    onClick={() => setActiveTab('matrix')}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center space-x-1.5 ${
+                      activeTab === 'matrix'
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'text-slate-600 hover:bg-slate-200/60'
+                    }`}
+                  >
+                    <span>📋</span>
+                    <span>Planificador</span>
+                    {pendingChanges.size > 0 && (
+                      <span className="bg-amber-400 text-slate-900 text-[10px] px-1.5 py-0.2 rounded-full font-bold">
+                        {pendingChanges.size}
+                      </span>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={() => setActiveTab('dashboard')}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center space-x-1.5 ${
+                      activeTab === 'dashboard'
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'text-slate-600 hover:bg-slate-200/60'
+                    }`}
+                  >
+                    <span>📊</span>
+                    <span>Dashboard Empresa</span>
+                  </button>
+
+                  <div className="w-px h-5 bg-slate-300 mx-1" />
+
+                  <button
+                    onClick={() => {
+                      const url = `/api/export/budget?company_id=${selectedCompanyId}&year=${selectedYear}`;
+                      window.open(url, '_blank');
+                    }}
+                    title={`Exportar presupuesto ${selectedYear} a Excel`}
+                    className="px-3 py-1 rounded-lg text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 transition flex items-center space-x-1"
+                  >
+                    <span>📥</span>
+                    <span>Excel</span>
+                  </button>
+                </div>
               </div>
             )}
+          </header>
 
+          {/* CUERPO PRINCIPAL */}
+          <main className="flex-1 max-w-[1920px] w-full mx-auto px-4 sm:px-6 py-5">
             {error && (
-              <div className="bg-rose-50 border border-rose-200 text-rose-700 p-4 rounded-xl text-sm font-medium">
+              <div className="mb-4 bg-rose-50 border border-rose-200 text-rose-700 p-4 rounded-xl text-xs font-medium">
                 {error}
               </div>
             )}
 
-            {!loading && data && (
-              <div className="space-y-4">
-                
-                {/* Resumen Superior */}
-                <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-3 text-sm">
-                  <div className="flex items-center space-x-5">
-                    <div>
-                      <span className="text-slate-400 font-medium">Categorías:</span>{' '}
-                      <span className="font-bold text-slate-800">{data.categories.length}</span>
-                    </div>
-                    <div className="h-4 w-px bg-slate-200" />
-                    <div>
-                      <span className="text-slate-400 font-medium">Cuentas Totales:</span>{' '}
-                      <span className="font-bold text-slate-800">
-                        {data.categories.reduce((acc, c) => acc + c.accounts.length, 0)}
-                      </span>
-                    </div>
+            {appMode === 'corporate' ? (
+              /* VISTA CONSOLIDADO CORPORATIVO */
+              <CorporateConsolidationView
+                companies={companies}
+                selectedYear={selectedYear}
+                onSelectYear={handleYearChange}
+                availableYears={availableYears}
+                onOpenAddCompany={openAddCompanyModal}
+                onEditCompany={setEditingCompany}
+              />
+            ) : activeTab === 'dashboard' ? (
+              /* VISTA DASHBOARD POR EMPRESA */
+              data && (
+                <CompanyDashboardView
+                  data={data}
+                  selectedYear={selectedYear}
+                  onSelectYear={handleYearChange}
+                  baseYear={baseYear}
+                  onSelectBaseYear={setBaseYear}
+                  availableYears={availableYears}
+                  comparisonData={comparisonData}
+                  loading={loading}
+                  onRefresh={() => {
+                    loadSummary(selectedCompanyId, selectedYear);
+                    loadDashboardData(selectedCompanyId, selectedYear, baseYear);
+                  }}
+                  onNavigateToMatrix={() => setActiveTab('matrix')}
+                />
+              )
+            ) : (
+              /* VISTA PLANIFICADOR / MATRIZ PRESUPUESTARIA */
+              <div>
+                {loading && (
+                  <div className="py-24 text-center">
+                    <div className="inline-block animate-spin rounded-full h-8 w-8 border-4 border-indigo-600 border-t-transparent" />
+                    <p className="mt-3 text-slate-500 text-sm font-medium">Cargando presupuesto para {activeCompany.name} ({selectedYear})...</p>
                   </div>
+                )}
 
-                  {/* Tip de Replicación de Enero */}
-                  <div className="hidden lg:flex items-center space-x-2 text-xs text-indigo-900 bg-indigo-50 border border-indigo-200 px-3 py-1.5 rounded-lg">
-                    <span className="text-base font-bold text-indigo-600">⇶</span>
-                    <span>
-                      <strong>Replicador automático:</strong> Un valor en <strong>Enero</strong> se replica a <strong>Feb - Dic</strong>. Luego puedes modificar cualquier mes individualmente.
-                    </span>
-                  </div>
+                {!loading && data && (
+                  <div className="space-y-4">
+                    {/* Barra de Cambios Pendientes */}
+                    {pendingChanges.size > 0 && (
+                      <div className="bg-amber-50 border border-amber-300 p-3 rounded-xl flex items-center justify-between animate-fade-in shadow-xs">
+                        <div className="flex items-center space-x-2 text-amber-900 text-xs">
+                          <span className="text-base">⚠️</span>
+                          <span>
+                            Tienes <strong>{pendingChanges.size}</strong> gasto(s) modificado(s) en memoria sin guardar.
+                          </span>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                          <button
+                            onClick={handleDiscard}
+                            className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-amber-100 rounded-lg transition"
+                          >
+                            Descartar
+                          </button>
+                          <button
+                            onClick={handleSaveExpenses}
+                            disabled={isSaving}
+                            className="px-4 py-1.5 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow transition disabled:opacity-50"
+                          >
+                            {isSaving ? 'Guardando...' : 'Guardar y Auditar'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
 
-                  <div className="flex items-center space-x-2">
-                    <span className="text-slate-500 font-medium">Total Anual General:</span>
-                    <span className="text-lg font-extrabold text-indigo-700 font-mono">
-                      {formatMoney(data.general_annual_total)}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Si no hay categorías aún */}
-                {data.categories.length === 0 ? (
-                  <div className="bg-white p-12 rounded-xl border border-dashed border-slate-300 text-center">
-                    <p className="text-slate-500 text-base mb-3">Aún no has creado ninguna categoría.</p>
-                    <button
-                      onClick={() => setIsCategoryModalOpen(true)}
-                      className="text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 px-4 py-2 rounded-lg transition"
-                    >
-                      + Crear mi primera categoría
-                    </button>
-                  </div>
-                ) : (
-                  /* Tabla de Estructura y Gastos Mensuales */
-                  <div className="relative pb-24">
+                    {/* Grilla Presupuestaria */}
                     <div className="overflow-x-auto shadow-sm rounded-xl border border-slate-200 bg-white">
-                      <table className="w-full text-left border-collapse text-sm">
-                        
-                        {/* Encabezado */}
-                        <thead className="bg-slate-100 text-slate-700 sticky top-16 z-20 font-semibold border-b border-slate-200">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead className="bg-slate-100 text-slate-700 sticky top-28 z-20 font-semibold border-b border-slate-200">
                           <tr>
-                            {/* 1. COLUMNA PROVEEDOR (A LA IZQUIERDA DE CATEGORÍA/CUENTA) */}
                             <th className="py-3 px-3 w-[180px] min-w-[160px] border-r border-slate-200 text-slate-800">
                               Proveedor
                             </th>
-                            {/* 2. COLUMNA CATEGORÍA / CUENTA */}
                             <th className="py-3 px-3 min-w-[280px] border-r border-slate-200">
                               Categoría / Cuenta
                             </th>
@@ -441,7 +1724,7 @@
                                   className={`py-2.5 px-2 text-right min-w-[105px] border-r border-slate-200 transition-colors ${
                                     isJan ? 'bg-indigo-50/90 text-indigo-950 font-bold border-b-2 border-indigo-400' : ''
                                   }`}
-                                  title={isJan ? "Enero: Al colocar o modificar este valor se replica a todos los meses (1-12)" : `${mName}: Modificación individual`}
+                                  title={isJan ? "Enero: Al colocar o modificar este valor se replica a todo el año (Feb-Dic)" : `${mName}: Modificación individual`}
                                 >
                                   <div className="flex items-center justify-end space-x-1">
                                     <span>{mName.slice(0, 3)}</span>
@@ -466,16 +1749,11 @@
                         <tbody className="divide-y divide-slate-100 font-mono">
                           {data.categories.map(cat => (
                             <React.Fragment key={cat.id}>
-                              
                               {/* FILA DE CATEGORÍA */}
                               <tr className="bg-slate-50/90 font-sans border-t-2 border-slate-200">
-                                
-                                {/* Columna Proveedor para Categoría */}
                                 <td className="py-2.5 px-3 border-r border-slate-200 text-slate-400 text-xs italic">
                                   —
                                 </td>
-
-                                {/* Columna Categoría */}
                                 <td className="py-2.5 px-3 border-r border-slate-200 flex items-center justify-between">
                                   <div className="flex items-center space-x-2">
                                     <span className="font-bold text-slate-900 text-sm">
@@ -487,10 +1765,7 @@
                                   </div>
                                   <div className="flex items-center space-x-1.5">
                                     <button
-                                      onClick={() => {
-                                        setTargetCategoryId(cat.id);
-                                        setIsAccountModalOpen(true);
-                                      }}
+                                      onClick={() => openAddAccountModal(cat.id)}
                                       title="Agregar cuenta a esta categoría"
                                       className="text-xs text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded font-semibold border border-indigo-200 transition"
                                     >
@@ -513,7 +1788,6 @@
                                   </div>
                                 </td>
 
-                                {/* Totales Mensuales de la Categoría (Requerimiento 3) */}
                                 {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
                                   <td
                                     key={m}
@@ -525,7 +1799,6 @@
                                   </td>
                                 ))}
 
-                                {/* Total Anual de la Categoría (Requerimiento 4) */}
                                 <td className="py-2.5 px-3 text-right bg-slate-100 font-bold text-indigo-900 font-mono text-sm">
                                   {formatMoney(cat.annual_total || '0.00')}
                                 </td>
@@ -537,10 +1810,7 @@
                                   <td colSpan={15} className="py-2.5 px-3 pl-8 text-slate-400 font-sans italic text-xs">
                                     No hay cuentas en esta categoría.{' '}
                                     <button
-                                      onClick={() => {
-                                        setTargetCategoryId(cat.id);
-                                        setIsAccountModalOpen(true);
-                                      }}
+                                      onClick={() => openAddAccountModal(cat.id)}
                                       className="text-indigo-600 underline font-medium"
                                     >
                                       Agregar cuenta ahora
@@ -550,11 +1820,10 @@
                               ) : (
                                 cat.accounts.map(acc => (
                                   <tr key={acc.id} className="hover:bg-indigo-50/30 transition-colors">
-                                    
-                                    {/* 1. Proveedor de la Cuenta (A la izquierda) */}
-                                    <td className="py-2 px-3 border-r border-slate-200 font-sans text-slate-600 text-sm truncate" title={acc.provider || ''}>
-                                      {acc.provider ? (
-                                        <span className="inline-block bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-xs border border-slate-200">
+                                    {/* PROVEEDOR (COLUMNA A LA IZQUIERDA) */}
+                                    <td className="py-2 px-3 border-r border-slate-200 font-sans text-slate-700 text-sm truncate" title={acc.provider || ''}>
+                                      {acc.provider && acc.provider.trim() ? (
+                                        <span className="inline-block bg-slate-100 text-slate-800 px-2.5 py-0.5 rounded text-xs border border-slate-300 font-medium">
                                           {acc.provider}
                                         </span>
                                       ) : (
@@ -562,7 +1831,6 @@
                                       )}
                                     </td>
 
-                                    {/* 2. Nombre de la Cuenta y Acciones */}
                                     <td className="py-2 px-3 pl-6 border-r border-slate-200 font-sans flex items-center justify-between">
                                       <span className="font-medium text-slate-800 text-sm">
                                         • {acc.name}
@@ -585,7 +1853,7 @@
                                       </div>
                                     </td>
 
-                                    {/* 12 Meses Editables de Gastos (Requerimiento 1: Total mensual cuenta) */}
+                                    {/* 12 MESES EDITABLES */}
                                     {Array.from({ length: 12 }, (_, i) => i + 1).map(m => {
                                       const isJan = m === 1;
                                       return (
@@ -606,10 +1874,9 @@
                                             }}
                                             title={
                                               isJan
-                                                ? 'Enero: Al ingresar o cambiar este valor se replica a todo el año (Feb-Dic). Presiona Enter o Tab al terminar.'
+                                                ? 'Enero: Al ingresar o cambiar este valor se replica a todo el año (Feb-Dic).'
                                                 : `${MONTH_NAMES[m - 1]}: Modificación individual para este mes`
                                             }
-                                            aria-label={`${acc.name} - ${MONTH_NAMES[m - 1]}`}
                                             className={`w-full h-9 px-2 text-right bg-transparent text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-sm hover:bg-slate-50/80 transition-colors ${
                                               isJan ? 'font-semibold text-indigo-950' : ''
                                             }`}
@@ -618,436 +1885,705 @@
                                       );
                                     })}
 
-                                    {/* Total Anual de la Cuenta (Requerimiento 2) */}
+                                    {/* Total Anual de la Cuenta */}
                                     <td className="py-2 px-3 text-right font-bold text-slate-800 bg-slate-50/50 text-sm">
                                       {formatMoney(acc.annual_total || '0.00')}
                                     </td>
                                   </tr>
                                 ))
                               )}
-
                             </React.Fragment>
                           ))}
                         </tbody>
 
-                        {/* PIE DE TABLA: TOTALES GENERALES (Requerimientos 5 y 6) */}
-                        <tfoot className="bg-slate-900 text-white font-mono sticky bottom-0 z-20 shadow-lg">
+                        {/* TOTAL GENERAL DE LA EMPRESA */}
+                        <tfoot className="bg-slate-900 text-white font-mono sticky bottom-0 z-10 shadow-md">
                           <tr>
-                            <td className="py-3.5 px-3 border-r border-slate-700 font-sans font-bold text-sm text-slate-300 uppercase tracking-wider">
-                              TOTAL GENERAL
+                            <td className="py-3 px-3 border-r border-slate-700 text-slate-400 text-xs italic">
+                              —
                             </td>
-
-                            <td className="py-3.5 px-3 border-r border-slate-700 font-sans font-semibold text-sm">
-                              {data.is_balanced ? (
-                                <span className="text-xs text-emerald-400 font-semibold bg-emerald-950 px-2 py-0.5 rounded border border-emerald-800">
-                                  ✓ Cuadre Verificado
-                                </span>
-                              ) : (
-                                <span className="text-xs text-rose-400 font-semibold bg-rose-950 px-2 py-0.5 rounded border border-rose-800">
-                                  ⚠ Descuadre
-                                </span>
-                              )}
+                            <td className="py-3 px-3 border-r border-slate-700 font-sans font-bold text-xs uppercase tracking-wider text-slate-200">
+                              TOTAL {activeCompany.code} {selectedYear}
                             </td>
-
-                            {/* 5. Total mensual general */}
                             {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
-                              <td key={m} className="py-3.5 px-2 text-right border-r border-slate-700 font-bold text-amber-300 text-sm">
+                              <td
+                                key={m}
+                                className="py-3 px-2 text-right border-r border-slate-700 font-bold text-amber-300 text-sm"
+                              >
                                 {formatMoney(data.general_monthly_totals[m] || '0.00')}
                               </td>
                             ))}
-
-                            {/* 6. Total anual general */}
-                            <td className="py-3.5 px-3 text-right font-bold text-emerald-400 bg-slate-950 text-base">
-                              {formatMoney(data.general_annual_total || '0.00')}
+                            <td className="py-3 px-3 text-right font-black text-emerald-400 bg-slate-950 text-sm">
+                              {formatMoney(data.general_annual_total)}
                             </td>
                           </tr>
                         </tfoot>
-
                       </table>
                     </div>
-
-                    {/* Barra Flotante de Guardado */}
-                    {pendingChanges.size > 0 && (
-                      <div className="fixed bottom-5 left-1/2 transform -translate-x-1/2 z-40 bg-slate-900 text-white px-5 py-3 rounded-xl shadow-2xl border border-slate-700 flex items-center space-x-4">
-                        <div className="flex items-center space-x-2">
-                          <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
-                          <span className="text-sm font-semibold text-amber-300">
-                            {pendingChanges.size} gasto(s) modificado(s)
-                          </span>
-                        </div>
-
-                        <div className="h-4 w-px bg-slate-700" />
-
-                        <div className="flex items-center space-x-2">
-                          <button
-                            onClick={handleSaveExpenses}
-                            disabled={isSaving}
-                            className="bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold px-4 py-1.5 rounded-lg shadow transition disabled:opacity-50"
-                          >
-                            {isSaving ? 'Guardando...' : 'Guardar Gastos'}
-                          </button>
-                          <button
-                            onClick={handleDiscard}
-                            className="text-sm text-slate-400 hover:text-white px-2 py-1.5"
-                          >
-                            Descartar
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
                   </div>
                 )}
-
               </div>
             )}
-
           </main>
 
-          {/* Modal para Crear Categoría */}
+          {/* MODAL NUEVA CATEGORÍA */}
           {isCategoryModalOpen && (
-            <CategoryModal
-              onClose={() => setIsCategoryModalOpen(false)}
-              onSuccess={() => {
-                showToast("Categoría creada");
-                loadSummary();
-              }}
-            />
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+              <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6">
+                <h3 className="text-lg font-bold text-slate-900 mb-1">Nueva Categoría Presupuestaria</h3>
+                <p className="text-xs text-slate-500 mb-4">
+                  Se creará dentro de la empresa activa: <strong>{activeCompany.name}</strong>
+                </p>
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    const name = e.target.categoryName.value.trim();
+                    const code = e.target.categoryCode.value.trim();
+                    if (!name) return;
+                    try {
+                      const res = await fetch('/api/categories', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name, code, company_id: selectedCompanyId })
+                      });
+                      if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.detail || "Error al crear categoría");
+                      }
+                      setIsCategoryModalOpen(false);
+                      showToast(`Categoría "${name}" creada`);
+                      loadSummary(selectedCompanyId, selectedYear);
+                    } catch (err) {
+                      alert(err.message);
+                    }
+                  }}
+                >
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Nombre de la Categoría</label>
+                  <input
+                    type="text"
+                    name="categoryName"
+                    required
+                    autoFocus
+                    placeholder="Ej. Servicios Tecnológicos, Logística..."
+                    className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-3"
+                  />
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Código Interno (Opcional)</label>
+                  <input
+                    type="text"
+                    name="categoryCode"
+                    placeholder="Ej. TEC, OPS..."
+                    className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-5"
+                  />
+                  <div className="flex items-center justify-end space-x-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsCategoryModalOpen(false)}
+                      className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-4 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow-sm transition"
+                    >
+                      Crear Categoría
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
           )}
 
-          {/* Modal para Crear Cuenta */}
+          {/* MODAL NUEVA CUENTA (SOLUCIÓN COMPLETA PARA PROVEEDOR) */}
           {isAccountModalOpen && (
-            <AccountModal
-              categories={data?.categories || []}
-              preselectedCategoryId={targetCategoryId}
-              onClose={() => {
-                setIsAccountModalOpen(false);
-                setTargetCategoryId(null);
-              }}
-              onSuccess={() => {
-                showToast("Cuenta creada");
-                loadSummary();
-              }}
-            />
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+              <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6">
+                <h3 className="text-lg font-bold text-slate-900 mb-1">Nueva Cuenta de Gasto</h3>
+                <p className="text-xs text-slate-500 mb-4">
+                  Crea una cuenta específica para registrar proyecciones en {activeCompany.code}.
+                </p>
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    const name = newAccountName.trim();
+                    const provider = newAccountProvider.trim();
+                    const code = newAccountCode.trim();
+                    if (!name) return;
+                    try {
+                      const res = await fetch(`/api/categories/${targetCategoryId}/accounts`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name, provider, code })
+                      });
+                      if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.detail || "Error al crear cuenta");
+                      }
+                      setIsAccountModalOpen(false);
+                      setTargetCategoryId(null);
+                      showToast(`Cuenta "${name}" creada`);
+                      loadSummary(selectedCompanyId, selectedYear);
+                    } catch (err) {
+                      alert(err.message);
+                    }
+                  }}
+                >
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Proveedor (Opcional)
+                  </label>
+                  <input
+                    type="text"
+                    value={newAccountProvider}
+                    onChange={(e) => setNewAccountProvider(e.target.value)}
+                    autoFocus
+                    placeholder="Ej. AWS, Cirion, Claro, Seguritas..."
+                    list="providers-autocomplete-list"
+                    className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-3"
+                  />
+                  <datalist id="providers-autocomplete-list">
+                    {existingProviders.map(p => (
+                      <option key={p} value={p} />
+                    ))}
+                  </datalist>
+
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Nombre de la Cuenta</label>
+                  <input
+                    type="text"
+                    value={newAccountName}
+                    onChange={(e) => setNewAccountName(e.target.value)}
+                    required
+                    placeholder="Ej. Servidores en la Nube, Enlaces..."
+                    className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-3"
+                  />
+
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Código Contable (Opcional)</label>
+                  <input
+                    type="text"
+                    value={newAccountCode}
+                    onChange={(e) => setNewAccountCode(e.target.value)}
+                    placeholder="Ej. 510101"
+                    className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-5"
+                  />
+
+                  <div className="flex items-center justify-end space-x-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsAccountModalOpen(false);
+                        setTargetCategoryId(null);
+                      }}
+                      className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-4 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow-sm transition"
+                    >
+                      Crear Cuenta
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
           )}
 
-          {/* Modal para Modificar Cuenta */}
+          {/* MODAL EDITAR CUENTA */}
           {editingAccount && (
-            <EditAccountModal
-              account={editingAccount}
-              categories={data?.categories || []}
-              onClose={() => setEditingAccount(null)}
-              onSuccess={() => {
-                showToast("Cuenta modificada correctamente");
-                loadSummary();
-              }}
-            />
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+              <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6">
+                <h3 className="text-lg font-bold text-slate-900 mb-1">Modificar Cuenta</h3>
+                <p className="text-xs text-slate-500 mb-4">Actualiza el nombre, proveedor o categoría asociada.</p>
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    const name = e.target.accountName.value.trim();
+                    const provider = e.target.accountProvider.value.trim();
+                    const code = e.target.accountCode.value.trim();
+                    const category_id = Number(e.target.categoryId.value);
+                    if (!name) return;
+                    try {
+                      const res = await fetch(`/api/accounts/${editingAccount.id}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name, provider, code, category_id })
+                      });
+                      if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.detail || "Error al actualizar cuenta");
+                      }
+                      setEditingAccount(null);
+                      showToast(`Cuenta "${name}" actualizada`);
+                      loadSummary(selectedCompanyId, selectedYear);
+                    } catch (err) {
+                      alert(err.message);
+                    }
+                  }}
+                >
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Proveedor</label>
+                  <input
+                    type="text"
+                    name="accountProvider"
+                    defaultValue={editingAccount.provider || ''}
+                    placeholder="Ej. AWS, Claro..."
+                    list="providers-autocomplete-list"
+                    className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-3"
+                  />
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Nombre de la Cuenta</label>
+                  <input
+                    type="text"
+                    name="accountName"
+                    defaultValue={editingAccount.name}
+                    required
+                    className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-3"
+                  />
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Código Contable</label>
+                  <input
+                    type="text"
+                    name="accountCode"
+                    defaultValue={editingAccount.code || ''}
+                    className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-3"
+                  />
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Categoría Perteneciente</label>
+                  <select
+                    name="categoryId"
+                    defaultValue={editingAccount.category_id}
+                    className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-5 bg-white"
+                  >
+                    {data.categories.map(c => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                  <div className="flex items-center justify-end space-x-2">
+                    <button
+                      type="button"
+                      onClick={() => setEditingAccount(null)}
+                      className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-4 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow-sm transition"
+                    >
+                      Guardar Cambios
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
           )}
 
-          {/* Modal para Modificar Categoría */}
+          {/* MODAL EDITAR CATEGORÍA */}
           {editingCategory && (
-            <EditCategoryModal
-              category={editingCategory}
-              onClose={() => setEditingCategory(null)}
-              onSuccess={() => {
-                showToast("Categoría modificada correctamente");
-                loadSummary();
-              }}
-            />
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+              <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6">
+                <h3 className="text-lg font-bold text-slate-900 mb-1">Modificar Categoría</h3>
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    const name = e.target.categoryName.value.trim();
+                    const code = e.target.categoryCode.value.trim();
+                    if (!name) return;
+                    try {
+                      const res = await fetch(`/api/categories/${editingCategory.id}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name, code })
+                      });
+                      if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.detail || "Error al actualizar categoría");
+                      }
+                      setEditingCategory(null);
+                      showToast(`Categoría "${name}" actualizada`);
+                      loadSummary(selectedCompanyId, selectedYear);
+                    } catch (err) {
+                      alert(err.message);
+                    }
+                  }}
+                >
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Nombre de la Categoría</label>
+                  <input
+                    type="text"
+                    name="categoryName"
+                    defaultValue={editingCategory.name}
+                    required
+                    className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-3"
+                  />
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Código</label>
+                  <input
+                    type="text"
+                    name="categoryCode"
+                    defaultValue={editingCategory.code || ''}
+                    className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-5"
+                  />
+                  <div className="flex items-center justify-end space-x-2">
+                    <button
+                      type="button"
+                      onClick={() => setEditingCategory(null)}
+                      className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-4 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow-sm transition"
+                    >
+                      Guardar
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* MODAL NUEVA EMPRESA */}
+          {isCompanyModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+              <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-lg w-full p-6 animate-fade-in">
+                <div className="flex items-center space-x-3 mb-2">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-100 text-indigo-700 flex items-center justify-center text-xl font-bold">
+                    🏢
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-900">Agregar Nueva Empresa</h3>
+                    <p className="text-xs text-slate-500">Incorpora una nueva sociedad o filial al grupo corporativo.</p>
+                  </div>
+                </div>
+
+                <div className="bg-indigo-50/70 border border-indigo-200/80 rounded-xl p-3 my-4 text-xs text-indigo-900">
+                  <div className="font-bold flex items-center space-x-1.5 mb-0.5">
+                    <span>📌</span>
+                    <span>Modelo Presupuestario Base 0:</span>
+                  </div>
+                  <p className="text-slate-600 leading-relaxed">
+                    La empresa se creará como una entidad independiente. Su presupuesto iniciará limpio, permitiendo configurar sus propias categorías, cuentas y proyecciones mensuales sin arrastre de datos.
+                  </p>
+                </div>
+
+                <form onSubmit={handleCreateCompany} className="space-y-3.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Código Único de Empresa *
+                      </label>
+                      <input
+                        type="text"
+                        value={companyCode}
+                        onChange={(e) => setCompanyCode(e.target.value.toUpperCase())}
+                        required
+                        autoFocus
+                        placeholder="Ej. NOVOPAN, MADESA"
+                        maxLength={20}
+                        className="w-full px-3.5 py-2 text-sm font-mono font-bold uppercase border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <span className="text-[10px] text-slate-400">Identificador corto e inmutable.</span>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        RUC / Identificación Tributaria
+                      </label>
+                      <input
+                        type="text"
+                        value={companyTaxId}
+                        onChange={(e) => setCompanyTaxId(e.target.value)}
+                        placeholder="Ej. 1790087654001"
+                        maxLength={20}
+                        className="w-full px-3.5 py-2 text-sm font-mono border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <span className="text-[10px] text-slate-400">Opcional (debe ser único si se ingresa).</span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Razón Social / Nombre Legal *
+                    </label>
+                    <input
+                      type="text"
+                      value={companyName}
+                      onChange={(e) => setCompanyName(e.target.value)}
+                      required
+                      placeholder="Ej. Novopan del Ecuador S.A."
+                      className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Nombre Comercial (Opcional)
+                    </label>
+                    <input
+                      type="text"
+                      value={companyTradeName}
+                      onChange={(e) => setCompanyTradeName(e.target.value)}
+                      placeholder="Ej. NOVOPAN"
+                      className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-100 flex items-center justify-end space-x-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsCompanyModalOpen(false)}
+                      className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-4 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow-sm transition flex items-center space-x-1"
+                    >
+                      <span>✓</span>
+                      <span>Registrar Empresa</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* MODAL EDITAR EMPRESA */}
+          {editingCompany && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+              <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-lg w-full p-6 animate-fade-in">
+                <div className="flex items-center space-x-3 mb-4 pb-3 border-b border-slate-100">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-100 text-indigo-700 flex items-center justify-center text-xl font-bold">
+                    ✏️
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-900">Editar Datos de la Empresa</h3>
+                    <p className="text-xs text-slate-500">Actualiza la razón social, código, RUC o estado de la sociedad.</p>
+                  </div>
+                </div>
+
+                <form onSubmit={handleUpdateCompany} className="space-y-3.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Código de Empresa *
+                      </label>
+                      <input
+                        type="text"
+                        name="compCode"
+                        defaultValue={editingCompany.code}
+                        required
+                        maxLength={20}
+                        className="w-full px-3.5 py-2 text-sm font-mono font-bold uppercase border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <span className="text-[10px] text-slate-400">Identificador único (ej. EDIMCA).</span>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        RUC / Identificación Tributaria
+                      </label>
+                      <input
+                        type="text"
+                        name="compTaxId"
+                        defaultValue={editingCompany.tax_id || ''}
+                        placeholder="Ej. 1790087654001"
+                        maxLength={20}
+                        className="w-full px-3.5 py-2 text-sm font-mono border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <span className="text-[10px] text-slate-400">Opcional.</span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Razón Social / Nombre Legal *
+                    </label>
+                    <input
+                      type="text"
+                      name="compName"
+                      defaultValue={editingCompany.name}
+                      required
+                      placeholder="Ej. EDIMCA S.A."
+                      className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Nombre Comercial
+                      </label>
+                      <input
+                        type="text"
+                        name="compTradeName"
+                        defaultValue={editingCompany.trade_name || ''}
+                        placeholder="Ej. EDIMCA"
+                        className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Estado Operativo
+                      </label>
+                      <select
+                        name="compStatus"
+                        defaultValue={editingCompany.status || 'ACTIVO'}
+                        className="w-full px-3.5 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+                      >
+                        <option value="ACTIVO">ACTIVO (Permite presupuestar)</option>
+                        <option value="INACTIVO">INACTIVO (Histórico / Inactivo)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="pt-3 border-t border-slate-100 flex items-center justify-end space-x-2">
+                    <button
+                      type="button"
+                      onClick={() => setEditingCompany(null)}
+                      className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-4 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow-sm transition flex items-center space-x-1"
+                    >
+                      <span>✓</span>
+                      <span>Guardar Cambios</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+          {/* MODAL COPIAR AÑO */}
+          {isCopyYearModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+              <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 animate-fade-in">
+                <div className="flex items-center space-x-3 mb-4 pb-3 border-b border-slate-100">
+                  <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center text-xl">
+                    📋
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-900">Copiar Presupuesto entre Años</h3>
+                    <p className="text-xs text-slate-500">Replica los valores de un año al otro. El año origen queda intacto.</p>
+                  </div>
+                </div>
+
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    const sourceYear = Number(e.target.sourceYear.value);
+                    const targetYear = Number(e.target.targetYear.value);
+                    const overwrite = e.target.overwrite.checked;
+
+                    if (sourceYear === targetYear) {
+                      alert('El año origen y el año destino no pueden ser el mismo.');
+                      return;
+                    }
+
+                    const overwriteMsg = overwrite
+                      ? '\n\n⚠️ SOBRESCRIBIR activado: los valores existentes en el año destino serán reemplazados.'
+                      : '\n\nLos valores ya existentes en el año destino NO serán modificados.';
+
+                    if (!confirm(
+                      `¿Copiar el presupuesto de ${sourceYear} → ${targetYear} para la empresa "${activeCompany.name}"?${overwriteMsg}`
+                    )) return;
+
+                    try {
+                      const res = await fetch(
+                        `/api/companies/${selectedCompanyId}/copy-year?source_year=${sourceYear}&target_year=${targetYear}&overwrite=${overwrite}`,
+                        { method: 'POST' }
+                      );
+                      if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.detail || 'Error al copiar el año');
+                      }
+                      const result = await res.json();
+                      setIsCopyYearModalOpen(false);
+                      showToast(`✓ Copiado ${sourceYear}→${targetYear}: ${result.records_created} creados, ${result.records_updated} actualizados, ${result.records_skipped} sin cambio.`);
+                      handleYearChange(targetYear);
+                    } catch (err) {
+                      alert(err.message);
+                    }
+                  }}
+                  className="space-y-4"
+                >
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">Año origen (copiar DE)</label>
+                      <select
+                        name="sourceYear"
+                        defaultValue={selectedYear}
+                        className="w-full px-3 py-2 text-sm font-bold text-indigo-700 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white"
+                      >
+                        {availableYears.map(yr => (
+                          <option key={yr} value={yr}>{yr}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">Año destino (copiar A)</label>
+                      <select
+                        name="targetYear"
+                        defaultValue={availableYears.find(yr => yr !== selectedYear) || selectedYear + 1}
+                        className="w-full px-3 py-2 text-sm font-bold text-indigo-700 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white"
+                      >
+                        {availableYears.map(yr => (
+                          <option key={yr} value={yr}>{yr}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900">
+                    <div className="font-bold mb-1 flex items-center space-x-1">
+                      <span>⚠️</span>
+                      <span>Comportamiento por defecto</span>
+                    </div>
+                    <p className="text-slate-600 leading-relaxed">
+                      Los valores que <strong>ya existan</strong> en el año destino no serán modificados.
+                      Activa "Sobrescribir" para reemplazarlos todos.
+                    </p>
+                  </div>
+
+                  <label className="flex items-center space-x-2.5 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      name="overwrite"
+                      className="w-4 h-4 accent-amber-600 cursor-pointer"
+                    />
+                    <span className="text-xs font-semibold text-slate-700">
+                      Sobrescribir valores existentes en el año destino
+                    </span>
+                  </label>
+
+                  <div className="pt-2 border-t border-slate-100 flex items-center justify-end space-x-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsCopyYearModalOpen(false)}
+                      className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-5 py-2 text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white rounded-lg shadow-sm transition flex items-center space-x-1.5"
+                    >
+                      <span>📋</span>
+                      <span>Copiar Presupuesto</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
           )}
 
         </div>
       );
     }
 
-    // Modal Crear Categoría
-    function CategoryModal({ onClose, onSuccess }) {
-      const [name, setName] = useState('');
-      const [error, setError] = useState('');
-      const [submitting, setSubmitting] = useState(false);
-
-      const handleSubmit = async (e) => {
-        e.preventDefault();
-        if (!name.trim()) return;
-        setSubmitting(true);
-        setError('');
-        try {
-          const res = await fetch('/api/categories', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: name.trim() })
-          });
-          if (!res.ok) {
-            const d = await res.json();
-            throw new Error(d.detail || "Error al crear categoría");
-          }
-          onSuccess();
-          onClose();
-        } catch (err) {
-          setError(err.message);
-        } finally {
-          setSubmitting(false);
-        }
-      };
-
-      return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 border border-slate-200 text-sm">
-            <h3 className="text-base font-bold text-slate-800 mb-3">Crear Nueva Categoría</h3>
-            {error && <div className="bg-rose-50 text-rose-700 p-2.5 rounded-lg mb-3 text-xs">{error}</div>}
-            <form onSubmit={handleSubmit} className="space-y-3.5">
-              <div>
-                <label className="block font-semibold mb-1 text-slate-700">Nombre de la Categoría</label>
-                <input
-                  required
-                  type="text"
-                  placeholder="Ej. Recursos Humanos, Gastos Operativos..."
-                  value={name}
-                  onChange={e => setName(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
-                />
-              </div>
-              <div className="pt-2 flex justify-end space-x-2">
-                <button type="button" onClick={onClose} className="px-3.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-600 font-medium">Cancelar</button>
-                <button type="submit" disabled={submitting} className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow transition disabled:opacity-50">
-                  {submitting ? 'Creando...' : 'Crear Categoría'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      );
-    }
-
-    // Modal Modificar Categoría
-    function EditCategoryModal({ category, onClose, onSuccess }) {
-      const [name, setName] = useState(category.name);
-      const [error, setError] = useState('');
-      const [submitting, setSubmitting] = useState(false);
-
-      const handleSubmit = async (e) => {
-        e.preventDefault();
-        if (!name.trim()) return;
-        setSubmitting(true);
-        setError('');
-        try {
-          const res = await fetch(`/api/categories/${category.id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: name.trim() })
-          });
-          if (!res.ok) {
-            const d = await res.json().catch(() => ({}));
-            throw new Error(d.detail || "Error al modificar la categoría");
-          }
-          onSuccess();
-          onClose();
-        } catch (err) {
-          setError(err.message);
-        } finally {
-          setSubmitting(false);
-        }
-      };
-
-      return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 border border-slate-200 text-sm">
-            <h3 className="text-base font-bold text-slate-800 mb-3">Modificar Categoría</h3>
-            {error && <div className="bg-rose-50 text-rose-700 p-2.5 rounded-lg mb-3 text-xs">{error}</div>}
-            <form onSubmit={handleSubmit} className="space-y-3.5">
-              <div>
-                <label className="block font-semibold mb-1 text-slate-700">Nombre de la Categoría</label>
-                <input
-                  required
-                  type="text"
-                  value={name}
-                  onChange={e => setName(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
-                />
-              </div>
-              <div className="pt-2 flex justify-end space-x-2">
-                <button type="button" onClick={onClose} className="px-3.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-600 font-medium">Cancelar</button>
-                <button type="submit" disabled={submitting} className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow transition disabled:opacity-50">
-                  {submitting ? 'Guardando...' : 'Guardar Cambios'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      );
-    }
-
-    // Modal Crear Cuenta
-    function AccountModal({ categories, preselectedCategoryId, onClose, onSuccess }) {
-      const [categoryId, setCategoryId] = useState(preselectedCategoryId || categories[0]?.id || '');
-      const [name, setName] = useState('');
-      const [provider, setProvider] = useState('');
-      const [error, setError] = useState('');
-      const [submitting, setSubmitting] = useState(false);
-
-      const handleSubmit = async (e) => {
-        e.preventDefault();
-        if (!name.trim() || !categoryId) return;
-        setSubmitting(true);
-        setError('');
-        try {
-          const res = await fetch(`/api/categories/${categoryId}/accounts`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: name.trim(), provider: provider.trim() })
-          });
-          if (!res.ok) {
-            const d = await res.json();
-            throw new Error(d.detail || "Error al crear cuenta");
-          }
-          onSuccess();
-          onClose();
-        } catch (err) {
-          setError(err.message);
-        } finally {
-          setSubmitting(false);
-        }
-      };
-
-      return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 border border-slate-200 text-sm">
-            <h3 className="text-base font-bold text-slate-800 mb-3">Crear Cuenta dentro de Categoría</h3>
-            {error && <div className="bg-rose-50 text-rose-700 p-2.5 rounded-lg mb-3 text-xs">{error}</div>}
-            <form onSubmit={handleSubmit} className="space-y-3.5">
-              <div>
-                <label className="block font-semibold mb-1 text-slate-700">Categoría</label>
-                <select
-                  value={categoryId}
-                  onChange={e => setCategoryId(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
-                >
-                  {categories.map(c => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block font-semibold mb-1 text-slate-700">Proveedor (Opcional)</label>
-                <input
-                  type="text"
-                  placeholder="Ej. AWS, Cirion, KMSolutions..."
-                  value={provider}
-                  onChange={e => setProvider(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
-                />
-              </div>
-              <div>
-                <label className="block font-semibold mb-1 text-slate-700">Nombre de la Cuenta</label>
-                <input
-                  required
-                  type="text"
-                  placeholder="Ej. Sueldos, Publicidad Digital, Mantenimiento..."
-                  value={name}
-                  onChange={e => setName(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
-                />
-              </div>
-              <div className="pt-2 flex justify-end space-x-2">
-                <button type="button" onClick={onClose} className="px-3.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-600 font-medium">Cancelar</button>
-                <button type="submit" disabled={submitting} className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow transition disabled:opacity-50">
-                  {submitting ? 'Creando...' : 'Crear Cuenta'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      );
-    }
-
-    // Modal Modificar Cuenta
-    function EditAccountModal({ account, categories, onClose, onSuccess }) {
-      const [name, setName] = useState(account.name);
-      const [provider, setProvider] = useState(account.provider || '');
-      const [categoryId, setCategoryId] = useState(account.category_id || categories[0]?.id || '');
-      const [error, setError] = useState('');
-      const [submitting, setSubmitting] = useState(false);
-
-      const handleSubmit = async (e) => {
-        e.preventDefault();
-        if (!name.trim()) return;
-        setSubmitting(true);
-        setError('');
-        try {
-          const res = await fetch(`/api/accounts/${account.id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              name: name.trim(),
-              provider: provider.trim(),
-              category_id: Number(categoryId)
-            })
-          });
-          if (!res.ok) {
-            const d = await res.json().catch(() => ({}));
-            throw new Error(d.detail || "Error al modificar la cuenta");
-          }
-          onSuccess();
-          onClose();
-        } catch (err) {
-          setError(err.message);
-        } finally {
-          setSubmitting(false);
-        }
-      };
-
-      return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 border border-slate-200 text-sm">
-            <h3 className="text-base font-bold text-slate-800 mb-3">Modificar Cuenta Presupuestaria</h3>
-            {error && <div className="bg-rose-50 text-rose-700 p-2.5 rounded-lg mb-3 text-xs">{error}</div>}
-            <form onSubmit={handleSubmit} className="space-y-3.5">
-              <div>
-                <label className="block font-semibold mb-1 text-slate-700">Categoría</label>
-                <select
-                  value={categoryId}
-                  onChange={e => setCategoryId(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
-                >
-                  {categories.map(c => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block font-semibold mb-1 text-slate-700">Proveedor</label>
-                <input
-                  type="text"
-                  placeholder="Ej. AWS, Cirion, KMSolutions..."
-                  value={provider}
-                  onChange={e => setProvider(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
-                />
-              </div>
-              <div>
-                <label className="block font-semibold mb-1 text-slate-700">Nombre de la Cuenta</label>
-                <input
-                  required
-                  type="text"
-                  placeholder="Ej. Sueldos, Publicidad Digital, Mantenimiento..."
-                  value={name}
-                  onChange={e => setName(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
-                />
-              </div>
-              <div className="pt-2 flex justify-end space-x-2">
-                <button type="button" onClick={onClose} className="px-3.5 py-1.5 rounded-lg hover:bg-slate-100 text-slate-600 font-medium">Cancelar</button>
-                <button type="submit" disabled={submitting} className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow transition disabled:opacity-50">
-                  {submitting ? 'Guardando...' : 'Guardar Cambios'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      );
-    }
-
-    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
   </script>
 </body>
 </html>
